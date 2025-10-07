@@ -6,7 +6,13 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 from statsmodels.stats.stattools import durbin_watson
-from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.diagnostic import het_breuschpagan, normal_ad
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import r2_score, log_loss
+from statsmodels.graphics.gofplots import qqplot
+from statsmodels.stats.stattools import durbin_watson
+from statsmodels.api import OLS, Logit, add_constant
+import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
@@ -14,7 +20,10 @@ from sklearn.preprocessing import LabelEncoder
 import warnings
 from pathlib import Path
 from typing import Union, Dict, Any, List
+import matplotlib.pyplot as plt
+import seaborn as sns
 warnings.filterwarnings("ignore")
+
 
 class DataProfiler:
     """
