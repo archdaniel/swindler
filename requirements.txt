@@ -1,0 +1,42 @@
+# Core Data Science & Machine Learning
+pandas>=1.5.0,<3.0.0       # Data manipulation and analysis
+numpy>=1.21.0,<2.0.0        # Fundamental package for numerical computing
+scikit-learn>=1.2.0,<1.5.0 # Machine Learning framework (pipelines, preprocessing, metrics)
+lightgbm>=3.3.0,<5.0.0     # LightGBM model library
+
+# Signal Processing for Feature Engineering
+PyWavelets>=1.4.0,<2.0.0    # For Wavelet Transforms (pywt)
+scipy>=1.8.0,<2.0.0        # For statistical functions (e.g., Shapiro-Wilk test)
+
+# API Framework & Server
+fastapi>=0.90.0,<0.112.0    # Modern, fast web framework for building APIs
+uvicorn[standard]>=0.20.0,<0.28.0 # ASGI server to run FastAPI (with standard extras)
+
+# LLM Integration
+google-generativeai>=0.4.0 # Check for latest stable version
+
+# File I/O
+openpyxl>=3.0.0,<4.0.0     # Required by Pandas for reading/writing Excel files (.xlsx)
+pyarrow>=10.0.0,<17.0.0    # Required by Pandas for reading/writing Parquet files
+
+# Configuration (Optional but Recommended)
+# python-dotenv>=0.20.0     # For loading environment variables from .env file (like API keys)
+
+bayesianbandits>=0.1.6 # Check for the latest version
+
+# FastAPI requires this library to handle file uploads -- for API.
+
+python-multipart>=0.0.9
+
+# --- Version Notes ---
+# - It's good practice to pin major/minor versions for reproducibility.
+# - CRITICAL: The scikit-learn version used here MUST be compatible with the version
+#   used when saving the model pipeline (.joblib file) to avoid loading errors.
+#   Ideally, use the exact same version.
+# - The openai library version >= 1.0.0 is important due to significant API changes.
+# - Feel free to adjust version constraints based on your specific environment
+#   or dependency resolver findings.
+
+# --- Optional for Development/Testing ---
+# pytest>=7.0.0             # For running tests in the /tests directory
+# jupyterlab>=3.5.0         # For running notebooks in the /notebooks directory
