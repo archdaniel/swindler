@@ -19,6 +19,11 @@ google-generativeai>=0.4.0 # Check for latest stable version
 openpyxl>=3.0.0,<4.0.0     # Required by Pandas for reading/writing Excel files (.xlsx)
 pyarrow>=10.0.0,<17.0.0    # Required by Pandas for reading/writing Parquet files
 
+# Statistical Modeling & Visualization
+statsmodels>=0.13.0,<0.15.0 # For statistical tests and models
+matplotlib>=3.5.0,<4.0.0   # For plotting
+seaborn>=0.12.0,<0.14.0      # For enhanced statistical plotting
+
 # Configuration (Optional but Recommended)
 # python-dotenv>=0.20.0     # For loading environment variables from .env file (like API keys)
 
