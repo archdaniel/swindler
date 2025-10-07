@@ -165,116 +165,112 @@ class ModelDataProfiler:
         self.numerical_features = numerical_features
         self.target = target
         self.cat_order = categorical_features_order
+        self.model = None
         self.results = {}
 
     def _load_data(self, data):
         if isinstance(data, pd.DataFrame):
             return data.copy()
         elif isinstance(data, str):
-            if data.endswith('.csv'):
+            if data.endswith(".csv"):
                 return pd.read_csv(data)
-            elif data.endswith('.parquet'):
+            elif data.endswith(".parquet"):
                 return pd.read_parquet(data)
             else:
-                raise ValueError("File format not supported: use CSV or Parquet")
+                raise ValueError("Unsupported format. Use CSV or Parquet.")
         else:
-            raise ValueError("Data must be a DataFrame or file path")
+            raise ValueError("Data must be DataFrame or file path.")
 
-    def _test_normality(self, series):
-        """Returns Shapiro, D’Agostino and Anderson-Darling results."""
-        shapiro_p = stats.shapiro(series.sample(min(5000, len(series))))[1]
-        dagostino_p = stats.normaltest(series)[1]
-        ad_result = stats.anderson(series)
-        ad_signif = np.mean(ad_result.statistic < ad_result.critical_values)
-        return {
-            'shapiro_p': shapiro_p,
-            'dagostino_p': dagostino_p,
-            'anderson_reject': ad_signif < 0.5
-        }
-
-    def _compute_vif(self, X):
-        vif_data = pd.DataFrame()
-        vif_data["feature"] = X.columns
-        vif_data["VIF"] = [variance_inflation_factor(X.values, i)
-                           for i in range(X.shape[1])]
-        return vif_data
-
-    def _test_homoscedasticity(self, X, y):
-        """Breusch–Pagan test for regression-style homoscedasticity."""
-        import statsmodels.api as sm
-        X_const = sm.add_constant(X)
-        model = sm.OLS(y, X_const).fit()
-        test = het_breuschpagan(model.resid, X_const)
-        return dict(zip(['LM stat', 'LM pvalue', 'F stat', 'F pvalue'], test))
-
-    def _nonlinearity_test(self, X, y):
-        """Compare linear correlation vs nonlinear (mutual information)."""
-        corr = np.abs([np.corrcoef(X[col], y)[0, 1] for col in X.columns])
-        if np.issubdtype(y.dtype, np.number):
-            mi = mutual_info_regression(X, y)
+    def _fit_baseline_model(self, X, y):
+        """Automatically select regression or classification baseline."""
+        if np.issubdtype(y.dtype, np.number) and y.nunique() > 10:
+            model_type = "regression"
+            model = LinearRegression()
+            model.fit(X, y)
+            preds = model.predict(X)
         else:
-            le = LabelEncoder()
-            mi = mutual_info_classif(X, le.fit_transform(y))
-        ratio = mi / (np.abs(corr) + 1e-8)
-        nonlinear_features = X.columns[ratio > 2].tolist()
-        return nonlinear_features
+            model_type = "classification"
+            model = LogisticRegression(max_iter=1000)
+            model.fit(X, y)
+            preds = model.predict_proba(X)[:, 1]
+        return model, preds, model_type
+
+    def _residual_analysis(self, y, preds, model_type):
+        residuals = y - preds
+        results = {}
+
+        # Normality tests
+        shapiro_p = stats.shapiro(residuals.sample(min(5000, len(residuals))))[1]
+        ad_stat, ad_p = normal_ad(residuals)
+        results['normality'] = {'shapiro_p': shapiro_p, 'anderson_darling_p': ad_p}
+
+        # Homoscedasticity (Breusch-Pagan)
+        X = sm.add_constant(preds)
+        lm, lm_pvalue, f, f_pvalue = het_breuschpagan(residuals, X)
+        results['homoscedasticity'] = {'LM pvalue': lm_pvalue, 'F pvalue': f_pvalue}
+
+        # Autocorrelation (Durbin–Watson)
+        dw = durbin_watson(residuals)
+        results['autocorrelation'] = {'durbin_watson': dw}
+
+        # Performance
+        if model_type == "regression":
+            results['performance'] = {'R2': r2_score(y, preds)}
+        else:
+            results['performance'] = {'log_loss': log_loss(y, preds)}
+
+        # Visual plots
+        self._plot_diagnostics(y, preds, residuals, model_type)
+
+        # Recommendation
+        if shapiro_p < 0.05 or f_pvalue < 0.05 or dw < 1.5 or dw > 2.5:
+            recommendation = "⚠️ Non-parametric or robust model suggested (e.g. tree-based, Huber)"
+        else:
+            recommendation = "✅ Parametric assumptions reasonable"
+        results['recommendation'] = recommendation
+
+        return results
+
+    def _plot_diagnostics(self, y, preds, residuals, model_type):
+        fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+        fig.suptitle("Residual Diagnostics", fontsize=14, weight="bold")
+
+        # 1. Residuals vs Fitted
+        axes[0, 0].scatter(preds, residuals, alpha=0.5)
+        axes[0, 0].axhline(0, color="red", linestyle="--")
+        axes[0, 0].set_title("Residuals vs Fitted")
+        axes[0, 0].set_xlabel("Fitted Values")
+        axes[0, 0].set_ylabel("Residuals")
+
+        # 2. QQ Plot
+        qqplot(residuals, line="s", ax=axes[0, 1])
+        axes[0, 1].set_title("QQ Plot")
+
+        # 3. Residual Histogram
+        sns.histplot(residuals, bins=30, kde=True, ax=axes[1, 0])
+        axes[1, 0].set_title("Residual Distribution")
+
+        # 4. Leverage Plot (using influence)
+        X = sm.add_constant(preds)
+        model = OLS(residuals, X).fit()
+        infl = model.get_influence()
+        leverage = infl.hat_matrix_diag
+        axes[1, 1].scatter(leverage, residuals, alpha=0.5)
+        axes[1, 1].set_title("Leverage vs Residuals")
+        axes[1, 1].set_xlabel("Leverage")
+        axes[1, 1].set_ylabel("Residuals")
+
+        plt.tight_layout()
+        plt.show()
 
     def profile(self):
         df = self.data.copy()
 
-        # --- Normality Tests ---
-        normality_results = {}
-        for col in self.numerical_features:
-            try:
-                normality_results[col] = self._test_normality(df[col].dropna())
-            except Exception as e:
-                normality_results[col] = {"error": str(e)}
+        # Prepare X and y
+        X = pd.get_dummies(df[self.numerical_features + self.categorical_features], drop_first=True)
+        y = df[self.target]
 
-        # --- Homoscedasticity ---
-        if np.issubdtype(df[self.target].dtype, np.number):
-            homo = self._test_homoscedasticity(df[self.numerical_features], df[self.target])
-        else:
-            homo = None
-
-        # --- Multicollinearity ---
-        vif = self._compute_vif(df[self.numerical_features])
-
-        # --- Nonlinearity ---
-        nonlinear = self._nonlinearity_test(df[self.numerical_features], df[self.target])
-
-        # --- Outlier summary ---
-        outlier_ratio = {}
-        for col in self.numerical_features:
-            z_scores = np.abs(stats.zscore(df[col].dropna()))
-            outlier_ratio[col] = np.mean(z_scores > 3)
-
-        # --- Summary ---
-        self.results = {
-            "normality": normality_results,
-            "homoscedasticity": homo,
-            "multicollinearity_vif": vif,
-            "nonlinearity_features": nonlinear,
-            "outlier_ratio": outlier_ratio
-        }
-
-        return self._summarize()
-
-    def _summarize(self):
-        norm_fail = sum(
-            [res['shapiro_p'] < 0.05 for res in self.results['normality'].values() if 'shapiro_p' in res])
-        high_vif = (self.results['multicollinearity_vif']['VIF'] > 5).sum()
-        nonlinear_count = len(self.results['nonlinearity_features'])
-
-        recommendation = "Parametric models OK"
-        if norm_fail > len(self.numerical_features) / 2 or nonlinear_count > 0 or high_vif > 2:
-            recommendation = "Prefer non-parametric models (e.g., tree-based, ensemble, kernel methods)"
-
-        return {
-            "summary": {
-                "normality_fail_count": norm_fail,
-                "high_vif_count": int(high_vif),
-                "nonlinear_features": nonlinear_count,
-                "recommendation": recommendation
-            },
-            **self.results
-        }
+        # Fit model and analyze residuals
+        self.model, preds, model_type = self._fit_baseline_model(X, y)
+        self.results = self._residual_analysis(y, preds, model_type)
+        return self.results
