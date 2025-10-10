@@ -191,7 +191,7 @@ class ModelDataProfiler:
 
     def _load_data(self, data, verbose: bool = True):
         if isinstance(data, pd.DataFrame):
-            if verbose: print("Loading data for ModelDataProfiler from DataFrame...")
+            if verbose: print("Loading data for ModelDataProfiler from DataFrame... really...")
             return data.copy()
         elif isinstance(data, str):
             if verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
