@@ -297,6 +297,8 @@ class ModelDataProfiler:
         if self.verbose: print("Starting ModelDataProfiler run...")
         df = self.data.copy()
  
+        transformed_to_numeric = []
+ 
         # --- Pre-emptive check for numeric-like categorical features ---
         if self.verbose: print("Checking for string columns that can be converted to numeric...")
         # Iterate over a copy since we might modify the list
@@ -317,17 +319,23 @@ class ModelDataProfiler:
                     df[col] = converted_series
                     self.numerical_features.append(col)
                     self.categorical_features.remove(col)
+                    transformed_to_numeric.append(col)
                 else:
                     if self.verbose: print(f"    -> Column '{col}' contains non-numeric values and will be treated as categorical.")
  
         # Prepare X and y
         if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
-        X = pd.get_dummies(df[self.numerical_features + self.categorical_features], drop_first=True)
+        
+        # Separate numerical and categorical dataframes
+        X_numerical = df[self.numerical_features].copy()
+        X_categorical = pd.get_dummies(df[self.categorical_features], drop_first=True)
+        X = pd.concat([X_numerical, X_categorical], axis=1)
+
         y = df[self.target]
         if self.verbose: print(f"Data prepared. Shape of X: {X.shape}")
-
+        
         # Fit model and analyze residuals
         self.model, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
         self.results = self._residual_analysis(y, preds, model_type, verbose=self.verbose)
         if self.verbose: print("ModelDataProfiler run finished.")
-        return self.results
+        return self.results, self.model, transformed_to_numeric
