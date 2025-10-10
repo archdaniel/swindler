@@ -189,7 +189,7 @@ class ModelDataProfiler:
         self.model = None
         self.results = {}
 
-    def _load_data(self, data):
+    def _load_data(self, data, verbose: bool = True):
         if isinstance(data, pd.DataFrame):
             if verbose: print("Loading data for ModelDataProfiler from DataFrame...")
             return data.copy()
