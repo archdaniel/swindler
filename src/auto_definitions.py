@@ -49,11 +49,13 @@ class DataProfiler:
         self.df = self._load_data(data_source)
         self.profile: Dict[str, Any] = {}
 
-    def _load_data(self, data_source: Union[pd.DataFrame, str, Path]) -> pd.DataFrame:
+    def _load_data(self, data_source: Union[pd.DataFrame, str, Path], verbose: bool = True) -> pd.DataFrame:
         """Loads data from various sources into a pandas DataFrame."""
         if isinstance(data_source, pd.DataFrame):
+            if verbose: print("Data source is a pandas DataFrame. Creating a copy.")
             return data_source.copy()
 
+        if verbose: print(f"Loading data from file: {data_source}")
         path = Path(data_source)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
@@ -80,11 +82,13 @@ class DataProfiler:
         categorical_cols = self.df.select_dtypes(exclude=np.number).columns.tolist()
         return numerical_cols, categorical_cols
 
-    def _calculate_correlations(self, numerical_cols: List[str]):
+    def _calculate_correlations(self, numerical_cols: List[str], verbose: bool = True):
         """Calculates Pearson and Kendall correlations for numerical columns."""
+        if verbose: print("Calculating correlations...")
         numerical_df = self.df[numerical_cols]
         if numerical_df.empty:
             self.profile['correlations'] = {'pearson': {}, 'kendall': {}}
+            if verbose: print("No numerical columns to calculate correlations.")
             return
 
         pearson_corr = numerical_df.corr(method='pearson')
@@ -94,13 +98,15 @@ class DataProfiler:
             'pearson': pearson_corr.to_dict(),
             'kendall': kendall_corr.to_dict()
         }
+        if verbose: print("Finished calculating correlations.")
 
-    def _check_normality(self, numerical_cols: List[str], p_value_threshold: float = 0.05):
+    def _check_normality(self, numerical_cols: List[str], p_value_threshold: float = 0.05, verbose: bool = True):
         """
         Performs Shapiro-Wilk test for normality on numerical columns.
         A feature's distribution is considered 'parametric' (normal) if the p-value
         is above the threshold.
         """
+        if verbose: print("Checking for normality...")
         normality_results = {}
         for col in numerical_cols:
             # The Shapiro-Wilk test requires at least 3 data points and works best on samples up to 5000.
@@ -123,10 +129,12 @@ class DataProfiler:
                     'notes': 'Not enough data to perform normality test.'
                 }
         self.profile['normality'] = normality_results
+        if verbose: print("Finished checking for normality.")
 
-    def _describe_domain(self, numerical_cols: List[str], categorical_cols: List[str]):
+    def _describe_domain(self, numerical_cols: List[str], categorical_cols: List[str], verbose: bool = True):
         """Describes the domain for each feature."""
         domain_info = {}
+        if verbose: print("Describing feature domains...")
         for col in numerical_cols:
             domain_info[col] = {
                 'type': 'numerical',
@@ -140,18 +148,21 @@ class DataProfiler:
                 'unique_values': unique_values.tolist()
             }
         self.profile['domain'] = domain_info
+        if verbose: print("Finished describing feature domains.")
 
-    def run(self) -> Dict[str, Any]:
+    def run(self, verbose: bool = True) -> Dict[str, Any]:
         """
         Runs the full data profiling analysis.
 
         Returns:
             Dict[str, Any]: A dictionary containing the full data profile.
         """
+        if verbose: print("Starting DataProfiler run...")
         numerical_cols, categorical_cols = self._get_feature_types()
-        self._calculate_correlations(numerical_cols)
-        self._check_normality(numerical_cols)
-        self._describe_domain(numerical_cols, categorical_cols)
+        self._calculate_correlations(numerical_cols, verbose=verbose)
+        self._check_normality(numerical_cols, verbose=verbose)
+        self._describe_domain(numerical_cols, categorical_cols, verbose=verbose)
+        if verbose: print("DataProfiler run finished.")
         return self.profile
 
 class ModelDataProfiler:
@@ -168,16 +179,18 @@ class ModelDataProfiler:
    - Return final recommendation
 
     """
-    def __init__(self, data, categorical_features, numerical_features, target, categorical_features_order=None):
+    def __init__(self, data, categorical_features, numerical_features, target, categorical_features_order=None, verbose=True):
         self.data = self._load_data(data)
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.target = target
         self.cat_order = categorical_features_order
+        self.verbose = verbose
         self.model = None
         self.results = {}
 
     def _load_data(self, data):
+        if self.verbose: print("Loading data for ModelDataProfiler...")
         if isinstance(data, pd.DataFrame):
             return data.copy()
         elif isinstance(data, str):
@@ -190,8 +203,10 @@ class ModelDataProfiler:
         else:
             raise ValueError("Data must be DataFrame or file path.")
 
-    def _fit_baseline_model(self, X, y):
+    def _fit_baseline_model(self, X, y, verbose: bool = True):
         """Automatically select regression or classification baseline."""
+        if verbose: print("Fitting baseline model...")
+
         if np.issubdtype(y.dtype, np.number) and y.nunique() > 10:
             model_type = "regression"
             model = LinearRegression()
@@ -202,10 +217,12 @@ class ModelDataProfiler:
             model = LogisticRegression(max_iter=1000)
             model.fit(X, y)
             preds = model.predict_proba(X)[:, 1]
+        if verbose: print(f"Baseline model fitted: {model_type}.")
         return model, preds, model_type
 
-    def _residual_analysis(self, y, preds, model_type):
+    def _residual_analysis(self, y, preds, model_type, verbose: bool = True):
         residuals = y - preds
+        if verbose: print("Performing residual analysis...")
         results = {}
 
         # Normality tests
@@ -229,7 +246,7 @@ class ModelDataProfiler:
             results['performance'] = {'log_loss': log_loss(y, preds)}
 
         # Visual plots
-        self._plot_diagnostics(y, preds, residuals, model_type)
+        self._plot_diagnostics(y, preds, residuals, model_type, verbose=verbose)
 
         # Recommendation
         if shapiro_p < 0.05 or f_pvalue < 0.05 or dw < 1.5 or dw > 2.5:
@@ -237,10 +254,12 @@ class ModelDataProfiler:
         else:
             recommendation = "✅ Parametric assumptions reasonable"
         results['recommendation'] = recommendation
+        if verbose: print("Finished residual analysis.")
 
         return results
 
-    def _plot_diagnostics(self, y, preds, residuals, model_type):
+    def _plot_diagnostics(self, y, preds, residuals, model_type, verbose: bool = True):
+        if verbose: print("Generating diagnostic plots...")
         fig, axes = plt.subplots(2, 2, figsize=(10, 8))
         fig.suptitle("Residual Diagnostics", fontsize=14, weight="bold")
 
@@ -271,15 +290,43 @@ class ModelDataProfiler:
 
         plt.tight_layout()
         plt.show()
+        if verbose: print("Finished generating diagnostic plots.")
 
     def profile(self):
+        if self.verbose: print("Starting ModelDataProfiler run...")
         df = self.data.copy()
+ 
+        # --- Pre-emptive check for numeric-like categorical features ---
+        if self.verbose: print("Checking for string columns that can be converted to numeric...")
+        # Iterate over a copy since we might modify the list
+        for col in self.categorical_features[:]:
+            # Only check object/string columns
+            if df[col].dtype == 'object' or pd.api.types.is_string_dtype(df[col]):
+                if self.verbose: print(f"  - Checking column '{col}' for potential numeric conversion...")
+                
+                # Attempt to convert to numeric, coercing errors will turn non-numeric values into NaT/NaN
+                converted_series = pd.to_numeric(df[col], errors='coerce')
+                
+                # If the number of nulls did not increase after conversion, it's safe to assume it's a numeric column
+                original_nulls = df[col].isnull().sum()
+                coerced_nulls = converted_series.isnull().sum()
 
+                if coerced_nulls == original_nulls:
+                    if self.verbose: print(f"    -> Successfully converted column '{col}' to numeric.")
+                    df[col] = converted_series
+                    self.numerical_features.append(col)
+                    self.categorical_features.remove(col)
+                else:
+                    if self.verbose: print(f"    -> Column '{col}' contains non-numeric values and will be treated as categorical.")
+ 
         # Prepare X and y
+        if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
         X = pd.get_dummies(df[self.numerical_features + self.categorical_features], drop_first=True)
         y = df[self.target]
+        if self.verbose: print(f"Data prepared. Shape of X: {X.shape}")
 
         # Fit model and analyze residuals
-        self.model, preds, model_type = self._fit_baseline_model(X, y)
-        self.results = self._residual_analysis(y, preds, model_type)
+        self.model, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
+        self.results = self._residual_analysis(y, preds, model_type, verbose=self.verbose)
+        if self.verbose: print("ModelDataProfiler run finished.")
         return self.results
