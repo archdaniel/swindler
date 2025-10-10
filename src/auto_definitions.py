@@ -352,10 +352,20 @@ class ModelDataProfiler:
         # --- Check for high domain numerical features (potential unique identifiers) ---
         if self.verbose: print("Checking for high domain numerical features...")
         for col in self.numerical_features[:]:
-            if df[col].nunique() / len(df[col]) > high_cardinality_threshold:
-                if self.verbose: print(f"    -> Column '{col}' has a very high domain, treating as a unique identifier.")
-                unique_numerical_ids.append(col)
-                self.numerical_features.remove(col)
+            # Check for high cardinality first
+            is_high_cardinality = df[col].nunique() / len(df[col]) > high_cardinality_threshold
+            if is_high_cardinality:
+                # If high cardinality, check skewness. True IDs are often uniformly distributed (low skew),
+                # whereas real-world values like payment amounts are often highly skewed.
+                skewness = df[col].skew()
+                # We'll use a threshold of 2 for skewness. Values between -2 and 2 are considered moderately skewed at most.
+                # Highly skewed distributions are less likely to be simple identifiers.
+                if abs(skewness) < 2:
+                    if self.verbose: print(f"    -> Column '{col}' has high cardinality and low skew ({skewness:.2f}), treating as a unique identifier.")
+                    unique_numerical_ids.append(col)
+                    self.numerical_features.remove(col)
+                else:
+                    if self.verbose: print(f"    -> Column '{col}' has high cardinality but is highly skewed ({skewness:.2f}), keeping as a numerical feature.")
  
         # Prepare X and y
         if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
