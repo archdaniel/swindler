@@ -298,6 +298,10 @@ class ModelDataProfiler:
         df = self.data.copy()
  
         transformed_to_numeric = []
+        date_features = []
+        unique_categorical_keys = []
+        unique_numerical_ids = []
+        high_cardinality_threshold = 0.95
  
         # --- Pre-emptive check for numeric-like categorical features ---
         if self.verbose: print("Checking for string columns that can be converted to numeric...")
@@ -322,6 +326,36 @@ class ModelDataProfiler:
                     transformed_to_numeric.append(col)
                 else:
                     if self.verbose: print(f"    -> Column '{col}' contains non-numeric values and will be treated as categorical.")
+
+        # --- Check for date-like categorical features ---
+        if self.verbose: print("Checking for date-like categorical features...")
+        for col in self.categorical_features[:]:
+            if df[col].dtype == 'object' or pd.api.types.is_string_dtype(df[col]):
+                try:
+                    converted_series = pd.to_datetime(df[col], errors='coerce')
+                    # If over 95% of non-null values can be converted to dates, treat as a date feature
+                    if converted_series.notna().sum() / df[col].notna().sum() > 0.95:
+                        if self.verbose: print(f"    -> Column '{col}' detected as a date feature.")
+                        date_features.append(col)
+                        self.categorical_features.remove(col)
+                except Exception:
+                    continue # Not a date
+
+        # --- Check for high cardinality categorical features (potential unique keys) ---
+        if self.verbose: print("Checking for high cardinality categorical features...")
+        for col in self.categorical_features[:]:
+            if df[col].nunique() / len(df[col]) > high_cardinality_threshold:
+                if self.verbose: print(f"    -> Column '{col}' has high cardinality, treating as a unique key.")
+                unique_categorical_keys.append(col)
+                self.categorical_features.remove(col)
+
+        # --- Check for high domain numerical features (potential unique identifiers) ---
+        if self.verbose: print("Checking for high domain numerical features...")
+        for col in self.numerical_features[:]:
+            if df[col].nunique() / len(df[col]) > high_cardinality_threshold:
+                if self.verbose: print(f"    -> Column '{col}' has a very high domain, treating as a unique identifier.")
+                unique_numerical_ids.append(col)
+                self.numerical_features.remove(col)
  
         # Prepare X and y
         if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
@@ -338,4 +372,10 @@ class ModelDataProfiler:
         self.model, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
         self.results = self._residual_analysis(y, preds, model_type, verbose=self.verbose)
         if self.verbose: print("ModelDataProfiler run finished.")
-        return self.results, self.model, transformed_to_numeric
+        return (
+            self.results, 
+            self.model, 
+            transformed_to_numeric, 
+            date_features, 
+            unique_categorical_keys, 
+            unique_numerical_ids)
