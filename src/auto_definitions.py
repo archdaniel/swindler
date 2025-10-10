@@ -180,20 +180,21 @@ class ModelDataProfiler:
 
     """
     def __init__(self, data, categorical_features, numerical_features, target, categorical_features_order=None, verbose=True):
+        self.verbose = verbose
         self.data = self._load_data(data)
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.target = target
         self.cat_order = categorical_features_order
-        self.verbose = verbose
         self.model = None
         self.results = {}
 
     def _load_data(self, data):
-        if self.verbose: print("Loading data for ModelDataProfiler...")
         if isinstance(data, pd.DataFrame):
+            if self.verbose: print("Loading data for ModelDataProfiler from DataFrame...")
             return data.copy()
         elif isinstance(data, str):
+            if self.verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
             if data.endswith(".csv"):
                 return pd.read_csv(data)
             elif data.endswith(".parquet"):
