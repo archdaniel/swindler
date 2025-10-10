@@ -181,6 +181,7 @@ class ModelDataProfiler:
     """
     def __init__(self, data, categorical_features, numerical_features, target, categorical_features_order=None, verbose=True):
         self.verbose = verbose
+        self.data = self._load_data(data, verbose=verbose)
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.target = target
