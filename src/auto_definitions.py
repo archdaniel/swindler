@@ -181,7 +181,6 @@ class ModelDataProfiler:
     """
     def __init__(self, data, categorical_features, numerical_features, target, categorical_features_order=None, verbose=True):
         self.verbose = verbose
-        self.data = self._load_data(data, verbose=verbose)
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.target = target
@@ -189,12 +188,12 @@ class ModelDataProfiler:
         self.model = None
         self.results = {}
 
-    def _load_data(self, data, verbose=True):
+    def _load_data(self, data):
         if isinstance(data, pd.DataFrame):
-            if verbose: print("Loading data for ModelDataProfiler from DataFrame...")
+            if self.verbose: print("Loading data for ModelDataProfiler from DataFrame...")
             return data.copy()
         elif isinstance(data, str):
-            if verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
+            if self.verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
             if data.endswith(".csv"):
                 return pd.read_csv(data)
             elif data.endswith(".parquet"):
