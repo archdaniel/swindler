@@ -191,10 +191,10 @@ class ModelDataProfiler:
 
     def _load_data(self, data):
         if isinstance(data, pd.DataFrame):
-            if self.verbose: print("Loading data for ModelDataProfiler from DataFrame...")
+            if verbose: print("Loading data for ModelDataProfiler from DataFrame...")
             return data.copy()
         elif isinstance(data, str):
-            if self.verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
+            if verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
             if data.endswith(".csv"):
                 return pd.read_csv(data)
             elif data.endswith(".parquet"):
