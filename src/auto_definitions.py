@@ -375,6 +375,33 @@ class ModelDataProfiler:
                     if is_float_like: reason.append("contains float values")
                     if self.verbose: print(f"    -> Column '{col}' has high cardinality but {' and '.join(reason)}. Keeping as a numerical feature.")
 
+        # --- Impute missing values ---
+        if self.verbose: print("Imputing missing values for baseline modeling...")
+        # Impute numerical features with the median
+        # Iterate over a copy of the list because we will be modifying it
+        for col in self.numerical_features[:]:
+            if df[col].isnull().any():
+                # Create a new binary indicator feature for missing values
+                indicator_col_name = f"{col}_was_missing"
+                df[indicator_col_name] = df[col].isnull().astype(int)
+                self.numerical_features.append(indicator_col_name)
+                if self.verbose: print(f"    -> Created missing indicator column '{indicator_col_name}' for '{col}'.")
+
+                median_val = df[col].median()
+                df[col].fillna(median_val, inplace=True)
+                if self.verbose: print(f"    -> Imputed NaNs in numerical column '{col}' with median ({median_val}).")
+        # Impute categorical features with the mode
+        for col in self.categorical_features[:]:
+            if df[col].isnull().any():
+                # Create a new binary indicator feature for missing values
+                indicator_col_name = f"{col}_was_missing"
+                df[indicator_col_name] = df[col].isnull().astype(int)
+                self.numerical_features.append(indicator_col_name)
+                if self.verbose: print(f"    -> Created missing indicator column '{indicator_col_name}' for '{col}'.")
+
+                mode_val = df[col].mode()[0]
+                df[col].fillna(mode_val, inplace=True)
+                if self.verbose: print(f"    -> Imputed NaNs in categorical column '{col}' with mode ('{mode_val}').")
  
         # Prepare X and y
         if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
