@@ -408,7 +408,7 @@ class ModelDataProfiler:
         
         # Separate numerical and categorical dataframes
         X_numerical = df[self.numerical_features].copy()
-        X_categorical = pd.get_dummies(df[self.categorical_features], drop_first=True)
+        # X_categorical = pd.get_dummies(df[self.categorical_features], drop_first=True)
         X = pd.concat([X_numerical, X_categorical], axis=1)
 
         y = df[self.target]
