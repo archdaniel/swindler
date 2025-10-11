@@ -424,4 +424,7 @@ class ModelDataProfiler:
             transformed_to_numeric, 
             date_features, 
             unique_categorical_keys, 
-            unique_numerical_ids)
+            unique_numerical_ids,
+            self.numerical_features,
+            self.categorical_features
+        )
