@@ -355,17 +355,26 @@ class ModelDataProfiler:
             # Check for high cardinality first
             is_high_cardinality = df[col].nunique() / len(df[col]) > high_cardinality_threshold
             if is_high_cardinality:
-                # If high cardinality, check skewness. True IDs are often uniformly distributed (low skew),
-                # whereas real-world values like payment amounts are often highly skewed.
+                # Heuristic 1: Check skewness. True IDs often have low skew.
                 skewness = df[col].skew()
-                # We'll use a threshold of 2 for skewness. Values between -2 and 2 are considered moderately skewed at most.
-                # Highly skewed distributions are less likely to be simple identifiers.
-                if abs(skewness) < 2:
-                    if self.verbose: print(f"    -> Column '{col}' has high cardinality and low skew ({skewness:.2f}), treating as a unique identifier.")
+                is_low_skew = abs(skewness) < 2.0
+
+                # Heuristic 2: Check if the column is integer-like.
+                # True IDs are rarely floats with meaningful decimal parts.
+                # Check if more than 1% of values have a non-zero fractional part.
+                is_float_like = (df[col].dropna() % 1 != 0).sum() / len(df[col].dropna()) > 0.01
+
+                # Decision: An ID should have high cardinality, low skew, and NOT be float-like.
+                if is_low_skew and not is_float_like:
+                    if self.verbose: print(f"    -> Column '{col}' has high cardinality, low skew ({skewness:.2f}), and is integer-like. Treating as a unique identifier.")
                     unique_numerical_ids.append(col)
                     self.numerical_features.remove(col)
                 else:
-                    if self.verbose: print(f"    -> Column '{col}' has high cardinality but is highly skewed ({skewness:.2f}), keeping as a numerical feature.")
+                    reason = []
+                    if not is_low_skew: reason.append(f"is highly skewed ({skewness:.2f})")
+                    if is_float_like: reason.append("contains float values")
+                    if self.verbose: print(f"    -> Column '{col}' has high cardinality but {' and '.join(reason)}. Keeping as a numerical feature.")
+
  
         # Prepare X and y
         if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
