@@ -203,7 +203,126 @@ class ModelDataProfiler:
                 raise ValueError("Unsupported format. Use CSV or Parquet.")
         else:
             raise ValueError("Data must be DataFrame or file path.")
+    def profile_data_encoding(self, fix=False):
+        """
+        Detects, describes, and optionally fixes encoding/storage anomalies in dataset features.
 
+        Parameters
+        ----------
+        fix : bool, default=False
+            If True, returns a cleaned copy of the dataframe with detected issues fixed automatically.
+            Otherwise, only reports issues.
+
+        Returns
+        -------
+        issues : dict
+            Dictionary describing anomalies for each column.
+        cleaned_df : pd.DataFrame (if fix=True)
+            Cleaned copy of dataframe with numeric-like strings converted.
+        """
+        df = self.data.copy()
+        issues = {}
+        unit_pattern = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*[a-zA-Z]+")  # e.g., '36 months', '5kg'
+        pct_pattern = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%$")
+        curr_pattern = re.compile(r"^\s*[$€]\s*([-+]?\d*\.?\d+)")
+
+        for col in df.columns:
+            series = df[col]
+            col_issues = []
+
+            # --- Detect numeric-like strings with symbols (%, $, commas)
+            if series.dtype == "object":
+                suspicious_mask = series.astype(str).str.contains(r'[%,$€]|[0-9]+,[0-9]+', regex=True)
+                if suspicious_mask.mean() > 0.1:
+                    col_issues.append(
+                        f"⚠️ {round(100*suspicious_mask.mean(),1)}% of entries look numeric but contain symbols (%, $, €, commas)."
+                    )
+
+            # --- Detect numeric + unit patterns like "36 months"
+            if series.dtype == "object":
+                num_unit_mask = series.astype(str).str.match(unit_pattern)
+                if num_unit_mask.mean() > 0.1:
+                    col_issues.append(
+                        f"📏 {round(100*num_unit_mask.mean(),1)}% of values appear to mix numbers and units (e.g. '36 months', '5kg')."
+                    )
+
+            # --- Detect possible numeric stored as string
+            if series.dtype == "object":
+                cleaned_str = (
+                    series.astype(str)
+                    .str.replace(",", "", regex=False)
+                    .str.replace("%", "", regex=False)
+                    .str.strip()
+                )
+                numeric_mask = cleaned_str.str.replace(".", "", 1).str.isnumeric()
+                if numeric_mask.mean() > 0.9:
+                    col_issues.append("💡 Likely numeric but stored as string (most values convertible to float).")
+
+            # --- Detect symbolic encodings
+            if series.dtype == "object":
+                values = series.astype(str)
+                if values.str.endswith("%").mean() > 0.5:
+                    col_issues.append("🧮 Appears to store percentages as text (values ending with '%').")
+                if values.str.contains(r"\$|€").mean() > 0.5:
+                    col_issues.append("💰 Appears to store currency values as text (contains $ or €).")
+
+            # --- Detect numeric scale mismatches
+            if pd.api.types.is_numeric_dtype(series):
+                if series.max() > 10 and series.mean() < 1:
+                    col_issues.append("📊 Possible % stored as 0–100 instead of 0–1.")
+                elif series.max() <= 1 and series.mean() < 0.1:
+                    col_issues.append("📉 Possible % stored as 0–1 instead of 0–100.")
+
+            # --- Detect mixed types
+            if series.dtype == "object":
+                unique_types = series.dropna().map(type).nunique()
+                if unique_types > 1:
+                    col_issues.append("⚠️ Mixed data types detected (numeric + non-numeric or inconsistent formats).")
+
+            # === OPTIONAL FIXES ===
+            if fix and series.dtype == "object":
+                fixed_series = series.astype(str).str.strip()
+
+                # Fix percentages like "7.5%" → 0.075
+                fixed_series = fixed_series.apply(
+                    lambda x: float(pct_pattern.match(x).group(1)) / 100
+                    if isinstance(x, str) and pct_pattern.match(x)
+                    else x
+                )
+
+                # Fix currency "$100" → 100.0
+                fixed_series = fixed_series.apply(
+                    lambda x: float(curr_pattern.match(x).group(1))
+                    if isinstance(x, str) and curr_pattern.match(x)
+                    else x
+                )
+
+                # Fix numeric + units "36 months" → 36.0
+                fixed_series = fixed_series.apply(
+                    lambda x: float(unit_pattern.match(x).group(1))
+                    if isinstance(x, str) and unit_pattern.match(x)
+                    else x
+                )
+
+                # Try to coerce remaining numeric strings
+                fixed_series = pd.to_numeric(fixed_series, errors='ignore')
+                df[col] = fixed_series
+
+            if col_issues:
+                issues[col] = col_issues
+
+        if self.verbose:
+            print("\n=== DATA ENCODING PROFILING REPORT ===")
+            for k, v in issues.items():
+                print(f"\n📁 Column: {k}")
+                for msg in v:
+                    print(f"  - {msg}")
+
+        if fix:
+            return issues, df
+        else:
+            return issues
+            
     def _fit_baseline_model(self, X, y, verbose: bool = True):
         """Automatically select regression or classification baseline."""
         if verbose: print("Fitting baseline model...")
@@ -396,7 +515,7 @@ class ModelDataProfiler:
                 # Create a new binary indicator feature for missing values
                 indicator_col_name = f"{col}_was_missing"
                 df[indicator_col_name] = df[col].isnull().astype(int)
-                self.numerical_features.append(indicator_col_name)
+                self.numerical_features.append(indicator_col_name) # this needs to be removed.
                 if self.verbose: print(f"    -> Created missing indicator column '{indicator_col_name}' for '{col}'.")
 
                 mode_val = df[col].mode()[0]
