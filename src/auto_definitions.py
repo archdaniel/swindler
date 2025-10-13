@@ -204,7 +204,7 @@ class ModelDataProfiler:
                 raise ValueError("Unsupported format. Use CSV or Parquet.")
         else:
             raise ValueError("Data must be DataFrame or file path.")
-    def profile_data_encoding(self, fix=False):
+    def profile_data_encoding(self, fix=True):
         """
         Detects, describes, and optionally fixes encoding/storage anomalies in dataset features.
 
