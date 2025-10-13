@@ -658,7 +658,11 @@ class AutoFeatureInspectorNNI:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
-        selector = FeatureGradientSelector(task=self.task_type)
+        if self.task_type == "classification":
+            selector = FeatureGradientSelector(classification=True)
+        else:
+            selector = FeatureGradientSelector(classification=False)
+
         selector.fit(X_scaled, y)
         selected_mask = selector.get_support()
         self.selected_features = X.columns[selected_mask].tolist()
