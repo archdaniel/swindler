@@ -272,7 +272,7 @@ class ModelDataProfiler:
                 if series.max() > 10 and series.mean() < 1:
                     col_issues.append("📊 Possible % stored as 0–100 instead of 0–1.")
                 elif series.max() <= 1 and series.mean() < 0.1:
-                    col_issues.append("📉 Possible % stored as 0–1 instead of 0–100.")
+                    col_issues.append("📉 Possible % stored as 0–1 instead of 0–100.") # wait...
 
             # --- Detect mixed types
             if series.dtype == "object":
@@ -549,3 +549,172 @@ class ModelDataProfiler:
             self.numerical_features,
             self.categorical_features
         )
+
+import re
+import numpy as np
+import pandas as pd
+from nni.algorithms.feature_engineering.gradient_selector import FeatureGradientSelector
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from scipy.stats import shapiro, spearmanr, levene
+from sklearn.metrics import roc_auc_score
+
+
+class AutoFeatureInspectorNNI:
+    """
+    Automatically:
+    1. Detects and fixes datatype mismatches (e.g. "36 months", "7.9%").
+    2. Automatically infers categorical/numerical features.
+    3. Determines task type (classification/regression) from target.
+    4. Selects features via NNI FeatureGradientSelector.
+    5. Tests data assumptions and recommends 'linear' or 'non-linear' model.
+    """
+
+    def __init__(self, data: pd.DataFrame, target: str, verbose=True):
+        self.data = data.copy()
+        self.target = target
+        self.verbose = verbose
+
+        self.fixed_data = None
+        self.anomalies = {}
+        self.categorical_features = []
+        self.numerical_features = []
+        self.selected_features = []
+        self.model_type = None
+        self.task_type = None  # 'regression' or 'classification'
+
+    # ---------------------------- STEP 1 ---------------------------- #
+    def _infer_and_fix_types(self):
+        df = self.data.copy()
+        anomalies = {}
+
+        for col in df.columns:
+            if col == self.target:
+                continue
+            anomalies[col] = []
+
+            # Convert percentages
+            if df[col].astype(str).str.endswith('%').any():
+                anomalies[col].append("Contains % symbols – converted to float.")
+                df[col] = df[col].astype(str).str.replace('%', '', regex=False)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Convert "36 months" etc.
+            elif df[col].astype(str).str.contains(r'\d+\s*(month|months|day|days|year|years)', case=False, regex=True).any():
+                anomalies[col].append("Contains units (months, days, years) – numeric extracted.")
+                df[col] = df[col].astype(str).str.extract(r'(\d+\.?\d*)')[0]
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Convert numeric strings
+            elif df[col].dtype == 'object':
+                converted = pd.to_numeric(df[col], errors='coerce')
+                if converted.notnull().sum() / len(df[col]) > 0.9:
+                    anomalies[col].append("Stored as string but mostly numeric – converted.")
+                    df[col] = converted
+
+            # High-null flag
+            if df[col].isnull().mean() > 0.5:
+                anomalies[col].append("High null ratio (>50%).")
+
+        # Infer categorical/numerical features
+        categorical, numerical = [], []
+        for col in df.columns:
+            if col == self.target:
+                continue
+            unique_ratio = df[col].nunique() / len(df[col])
+            if df[col].dtype == 'object' or unique_ratio < 0.05:
+                categorical.append(col)
+            else:
+                numerical.append(col)
+
+        # Infer target type
+        if df[self.target].nunique() <= 10 and df[self.target].dtype != 'float':
+            self.task_type = "classification"
+        else:
+            self.task_type = "regression"
+
+        self.fixed_data = df
+        self.anomalies = {k: v for k, v in anomalies.items() if v}
+        self.categorical_features = categorical
+        self.numerical_features = numerical
+
+        if self.verbose:
+            print(f"✔ Type inference complete: {len(categorical)} categorical, {len(numerical)} numerical features.")
+            print(f"✔ Task type inferred: {self.task_type}")
+            print(f"✔ {len(self.anomalies)} anomalies found.")
+
+    # ---------------------------- STEP 2 ---------------------------- #
+    def _select_features_with_nni(self):
+        df = self.fixed_data.copy().dropna(subset=[self.target])
+        X = df.drop(columns=[self.target])
+        y = df[self.target]
+
+        # Encode categoricals
+        for col in self.categorical_features:
+            le = LabelEncoder()
+            X[col] = le.fit_transform(X[col].astype(str))
+
+        X = X.fillna(X.median())
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        selector = FeatureGradientSelector(task=self.task_type)
+        selector.fit(X_scaled, y)
+        selected_mask = selector.get_support()
+        self.selected_features = X.columns[selected_mask].tolist()
+
+        if self.verbose:
+            print(f"✔ Selected {len(self.selected_features)} features using NNI GradientFeatureSelector.")
+
+    # ---------------------------- STEP 3 ---------------------------- #
+    def _test_model_assumptions(self):
+        df = self.fixed_data.dropna(subset=[self.target]).copy()
+        if not self.selected_features:
+            self.selected_features = self.numerical_features
+
+        X = df[self.selected_features].fillna(df[self.selected_features].median())
+        y = df[self.target]
+
+        # Encode target if classification
+        if self.task_type == "classification":
+            le = LabelEncoder()
+            y = le.fit_transform(y)
+
+        if self.task_type == "regression":
+            model = LinearRegression()
+            model.fit(X, y)
+            preds = model.predict(X)
+            residuals = y - preds
+
+            normal_p = shapiro(residuals)[1] if len(residuals) > 3 else 0
+            spearman_corr = abs(spearmanr(preds, y)[0])
+            lev_p = levene(preds, residuals)[1] if len(residuals) > 3 else 0
+
+            linearity_score = (normal_p > 0.05) + (spearman_corr > 0.8) + (lev_p > 0.05)
+            self.model_type = "linear" if linearity_score >= 2 else "non-linear"
+
+        else:  # classification
+            model = LogisticRegression(max_iter=200)
+            model.fit(X, y)
+            preds = model.predict_proba(X)[:, 1]
+            auc = roc_auc_score(y, preds)
+
+            # Rule of thumb: high AUC with logistic => linear separability
+            self.model_type = "linear" if auc > 0.8 else "non-linear"
+
+        if self.verbose:
+            print(f"✔ Model recommendation → {self.model_type} ({self.task_type})")
+
+    # ---------------------------- PIPELINE ---------------------------- #
+    def run(self):
+        self._infer_and_fix_types()
+        self._select_features_with_nni()
+        self._test_model_assumptions()
+        return {
+            "anomalies": self.anomalies,
+            "categorical_features": self.categorical_features,
+            "numerical_features": self.numerical_features,
+            "selected_features": self.selected_features,
+            "task_type": self.task_type,
+            "model_recommendation": self.model_type,
+        }
