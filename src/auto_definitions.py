@@ -23,6 +23,14 @@ from pathlib import Path
 from typing import Union, Dict, Any, List
 import matplotlib.pyplot as plt
 import seaborn as sns
+import re
+import numpy as np
+import pandas as pd
+from nni.algorithms.feature_engineering.gradient_selector import FeatureGradientSelector, fginitialize
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from scipy.stats import shapiro, spearmanr, levene
+from sklearn.metrics import roc_auc_score
 warnings.filterwarnings("ignore")
 
 def safe_compute_data_stats(self):
@@ -568,14 +576,7 @@ class ModelDataProfiler:
             self.categorical_features
         )
 
-import re
-import numpy as np
-import pandas as pd
-from nni.algorithms.feature_engineering.gradient_selector import FeatureGradientSelector
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from scipy.stats import shapiro, spearmanr, levene
-from sklearn.metrics import roc_auc_score
+
 
 
 class AutoFeatureInspectorNNI:
