@@ -23,7 +23,7 @@ step:
 
     7. IMPROVEMENTS
     {
-    1. USE ([GradientFeatureSelector](https://nni.readthedocs.io/en/stable/feature_engineering/gradient_feature_selector.html)) for feature selection instead of whatever we are doing currently. seems very promissing
+    1. USE ([GradientFeatureSelector](https://nni.readthedocs.io/en/stable/feature_engineering/gradient_feature_selector.html)) for feature selection instead of whatever we are doing currently. seems very promissing ⚠️⚠️⚠️⚠️⚠️ Tried this for a while. The tensor transformations and type mismatchs -- present in this version -- kept me from moving forward. I am adding a patch version for the tensors assignments, but there's still the issue of loss being defined as NaN. I will work on this feature later. Let's focus now in the order in which things are listed here. Starting from the improvement instead of the current features was not a good call. Get this working, then make another version. Classic Me, though. ⚠️⚠️⚠️⚠️⚠️
     } ⚠️
 ---
 To do list for this version.
