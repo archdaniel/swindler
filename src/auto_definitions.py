@@ -658,15 +658,22 @@ class AutoFeatureInspectorNNI:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
-        try:
-            # For newer NNI versions
-            selector = FeatureGradientSelector(task=self.task_type)
-        except TypeError:
-            # For older NNI versions
-            is_classification = self.task_type == "classification"
-            selector = FeatureGradientSelector(classification=is_classification)
+        if self.task_type == "classification":
+            print(f"type of task: {self.task_type}")
+            selector = FeatureGradientSelector(classification=True)
+        else:
+            print(f"type of task: {self.task_type}")
+            selector = FeatureGradientSelector(classification=False)
 
         selector.fit(X_scaled, y)
+        
+        # Initialize selector without arguments for compatibility.
+        selector = FeatureGradientSelector()
+        
+        # The classification flag is passed in the fit method for some versions.
+        is_classification = self.task_type == "classification"
+        selector.fit(X_scaled, y, classification=is_classification)
+        
         selected_mask = selector.get_support()
         self.selected_features = X.columns[selected_mask].tolist()
 
