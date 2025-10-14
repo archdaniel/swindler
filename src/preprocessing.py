@@ -9,24 +9,6 @@ import re
 from typing import List, Tuple, Dict, Any, Union
 from sklearn.base import BaseEstimator, TransformerMixin
 
-def safe_compute_data_stats(self):
-    X, y = self.X[self.ix_statistics], self.y[self.ix_statistics]
-    preprocess = self.preprocess
-    classification = self.classification
-
-    Xmn = X.mean(dim=0).numpy()
-    Xsd = X.std(dim=0).numpy()
-    Xc = (X - Xmn) / (Xsd + 1e-8)
-    Xc_np = Xc.detach().cpu().numpy()   # ensure numpy
-
-    sv1 = scipy.sparse.linalg.svds(Xc_np / np.sqrt(y.numel()), k=1, which='LM', return_singular_vectors=False)
-    sv1 = np.array([min(np.finfo(np.float32).max, sv1[0])])
-
-    ymn, ysd = (0., 1.) if classification else (y.mean().item(), y.std().item())
-    return Xmn, sv1, Xsd, ymn, ysd
-
-fginitialize.PrepareData.compute_data_stats = safe_compute_data_stats
-
 class AutoPreprocessor(BaseEstimator, TransformerMixin):
     """
     A preprocessor that automates feature detection, cleaning, imputation,

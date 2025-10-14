@@ -1,8 +1,8 @@
 ---
 step: 
     1. fix the definition of what model to use based on the linear assumptions. ⚠️
-    2. reassign column types and make it so the class (auto_definitions/ModelDataProfiler) makes the type assignments by itself -- no passing it as input. ⚠️
-    3. make the poorly inputed features get fixed (e.g. percentage having the % within the feature values) ⚠️
+    2. reassign column types and make it so the class (auto_definitions/ModelDataProfiler) makes the type assignments by itself -- no passing it as input. ✅
+    3. make the poorly inputed features get fixed (e.g. percentage having the % within the feature values) ✅
     4. return the recommendation of model type to be used so model_definitions can use it to train a set of candidates. ⚠️
     5. the model_definitions class should receive a dataframe for training. as a parameters {
         a. the type of training validation to be used -- cross validation, etc.
