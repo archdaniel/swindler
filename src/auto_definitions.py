@@ -209,15 +209,24 @@ class ModelDataProfiler:
    - Return final recommendation
 
     """
-    def __init__(self, data, categorical_features, numerical_features, target, categorical_features_order=None, verbose=True):
+    def __init__(self, data, target, categorical_features_order=None, verbose=True):
         self.verbose = verbose
         self.data = self._load_data(data, verbose=verbose)
-        self.categorical_features = categorical_features
-        self.numerical_features = numerical_features
         self.target = target
         self.cat_order = categorical_features_order
         self.model = None
         self.results = {}
+        self._identify_feature_types()
+
+    def _identify_feature_types(self):
+        """Identifies numerical and categorical features from the dataframe."""
+        if self.verbose: print("Automatically identifying feature types...")
+        numerical_features = self.data.select_dtypes(include=np.number).columns.tolist()
+        if self.target in numerical_features:
+            numerical_features.remove(self.target)
+        self.numerical_features = numerical_features
+        self.categorical_features = self.data.select_dtypes(exclude=np.number).columns.tolist()
+        if self.verbose: print(f"Identified {len(self.numerical_features)} numerical and {len(self.categorical_features)} categorical features.")
 
     def _load_data(self, data, verbose: bool = True):
         if isinstance(data, pd.DataFrame):
