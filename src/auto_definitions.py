@@ -444,37 +444,21 @@ class ModelDataProfiler:
 
     def profile(self):
         if self.verbose: print("Starting ModelDataProfiler run...")
-        df = self.data.copy()
  
+        # --- Use profile_data_encoding to clean the data first ---
+        if self.verbose: print("Running data encoding profiling and fixing...")
+        issues, df = self.profile_data_encoding(fix=True)
+        if self.verbose: print("Data encoding fixing complete.")
+
+        # --- Re-identify feature types based on the cleaned dataframe ---
+        self.numerical_features = df.select_dtypes(include=np.number).columns.drop(self.target, errors='ignore').tolist()
+        self.categorical_features = df.select_dtypes(exclude=np.number).columns.tolist()
+
         transformed_to_numeric = []
         date_features = []
         unique_categorical_keys = []
         unique_numerical_ids = []
         high_cardinality_threshold = 0.95
- 
-        # --- Pre-emptive check for numeric-like categorical features ---
-        if self.verbose: print("Checking for string columns that can be converted to numeric...")
-        # Iterate over a copy since we might modify the list
-        for col in self.categorical_features[:]:
-            # Only check object/string columns
-            if df[col].dtype == 'object' or pd.api.types.is_string_dtype(df[col]):
-                if self.verbose: print(f"  - Checking column '{col}' for potential numeric conversion...")
-                
-                # Attempt to convert to numeric, coercing errors will turn non-numeric values into NaT/NaN
-                converted_series = pd.to_numeric(df[col], errors='coerce')
-                
-                # If the number of nulls did not increase after conversion, it's safe to assume it's a numeric column
-                original_nulls = df[col].isnull().sum()
-                coerced_nulls = converted_series.isnull().sum()
-
-                if coerced_nulls == original_nulls:
-                    if self.verbose: print(f"    -> Successfully converted column '{col}' to numeric.")
-                    df[col] = converted_series
-                    self.numerical_features.append(col)
-                    self.categorical_features.remove(col)
-                    transformed_to_numeric.append(col)
-                else:
-                    if self.verbose: print(f"    -> Column '{col}' contains non-numeric values and will be treated as categorical.")
 
         # --- Check for date-like categorical features ---
         if self.verbose: print("Checking for date-like categorical features...")

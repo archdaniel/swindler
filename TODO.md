@@ -5,7 +5,7 @@ step:
     3. make the poorly inputed features get fixed (e.g. percentage having the % within the feature values) ✅
     4. return the recommendation of model type to be used so model_definitions can use it to train a set of candidates. ⚠️
     5. the model_definitions class should receive a dataframe for training. as a parameters {
-        z. This version is one-hot encoding features that simply don't make any sense (e.g  dunning activities, activity_type_hystory -- to many unique values for one-hot-encoding. fix it) ⚠️⚠️⚠️⚠️
+        z. This version is one-hot encoding features that simply don't make any sense (e.g  dunning activities, activity_type_hystory -- to many unique values for one-hot-encoding. fix it) ⚠️⚠️⚠️⚠️ -- ABSOLUTE PRIORITY NOW.
         a. the type of training validation to be used -- cross validation, etc.
         b. loss function
         c. hyperparameter search function with hyperopt as standard
