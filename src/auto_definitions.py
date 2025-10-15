@@ -31,6 +31,8 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from scipy.stats import shapiro, spearmanr, levene
 from sklearn.metrics import roc_auc_score
+import scipy.sparse.linalg
+import warnings
 warnings.filterwarnings("ignore")
 
 def safe_compute_data_stats(self):
