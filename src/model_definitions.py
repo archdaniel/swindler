@@ -209,8 +209,8 @@ class ModelTrainer:
                             search_params[p_name] = np.logspace(p_value.pos_args[0].obj, p_value.pos_args[1].obj, 5)
                         elif p_value.name == 'uniform':
                             search_params[p_name] = np.linspace(p_value.pos_args[0].obj, p_value.pos_args[1].obj, 5)
-                        else: # choice
-                            search_params[p_name] = p_value.pos_args[0].obj
+                        elif p_value.name == 'choice':
+                            search_params[p_name] = p_value.pos_args[1].obj
 
                     if self.hyperparam_strategy == 'grid_search':
                         search_cv = GridSearchCV(model, search_params, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1)
