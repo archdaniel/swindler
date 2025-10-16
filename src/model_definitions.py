@@ -124,26 +124,26 @@ class ModelTrainer:
             }
             if self.model_type == 'non-linear':
                 models['RandomForestClassifier'] = (RandomForestClassifier(random_state=self.random_state), {
-                    'n_estimators': hp.choice('n_estimators_rf', [100, 200, 300]),
-                    'max_depth': hp.choice('max_depth_rf', [10, 20, 30, None])
+                    'n_estimators': hp.choice('n_estimators', [100, 200, 300]),
+                    'max_depth': hp.choice('max_depth', [10, 20, 30, None])
                 })
                 if xgb:
                     models['XGBClassifier'] = (xgb.XGBClassifier(random_state=self.random_state, use_label_encoder=False, eval_metric='logloss'), {
-                        'n_estimators': hp.choice('n_estimators_xgb', [100, 200, 500]),
-                        'learning_rate': hp.uniform('learning_rate_xgb', 0.01, 0.2),
-                        'max_depth': hp.choice('max_depth_xgb', [3, 5, 7])
+                        'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                        'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                        'max_depth': hp.choice('max_depth', [3, 5, 7])
                     })
                 if lgb:
                     models['LGBMClassifier'] = (lgb.LGBMClassifier(random_state=self.random_state), {
-                        'n_estimators': hp.choice('n_estimators_lgbm', [100, 200, 500]),
-                        'learning_rate': hp.uniform('learning_rate_lgbm', 0.01, 0.2),
-                        'num_leaves': hp.choice('num_leaves_lgbm', [20, 31, 40, 50])
+                        'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                        'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                        'num_leaves': hp.choice('num_leaves', [20, 31, 40, 50])
                     })
                 if cb:
                     models['CatBoostClassifier'] = (cb.CatBoostClassifier(random_state=self.random_state, verbose=0), {
-                        'iterations': hp.choice('iterations_cb', [100, 200, 500]),
-                        'learning_rate': hp.uniform('learning_rate_cb', 0.01, 0.2),
-                        'depth': hp.choice('depth_cb', [4, 6, 8])
+                        'iterations': hp.choice('iterations', [100, 200, 500]),
+                        'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                        'depth': hp.choice('depth', [4, 6, 8])
                     })
         elif self.task_type == 'regression':
             self.scoring = 'r2'
@@ -154,26 +154,26 @@ class ModelTrainer:
             }
             if self.model_type == 'non-linear':
                 models['RandomForestRegressor'] = (RandomForestRegressor(random_state=self.random_state), {
-                    'n_estimators': hp.choice('n_estimators_rf', [100, 200, 300]),
-                    'max_depth': hp.choice('max_depth_rf', [10, 20, 30, None])
+                    'n_estimators': hp.choice('n_estimators', [100, 200, 300]),
+                    'max_depth': hp.choice('max_depth', [10, 20, 30, None])
                 })
                 if xgb:
                     models['XGBRegressor'] = (xgb.XGBRegressor(random_state=self.random_state), {
-                        'n_estimators': hp.choice('n_estimators_xgb', [100, 200, 500]),
-                        'learning_rate': hp.uniform('learning_rate_xgb', 0.01, 0.2),
-                        'max_depth': hp.choice('max_depth_xgb', [3, 5, 7])
+                        'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                        'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                        'max_depth': hp.choice('max_depth', [3, 5, 7])
                     })
                 if lgb:
                     models['LGBMRegressor'] = (lgb.LGBMRegressor(random_state=self.random_state), {
-                        'n_estimators': hp.choice('n_estimators_lgbm', [100, 200, 500]),
-                        'learning_rate': hp.uniform('learning_rate_lgbm', 0.01, 0.2),
-                        'num_leaves': hp.choice('num_leaves_lgbm', [20, 31, 40, 50])
+                        'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                        'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                        'num_leaves': hp.choice('num_leaves', [20, 31, 40, 50])
                     })
                 if cb:
                     models['CatBoostRegressor'] = (cb.CatBoostRegressor(random_state=self.random_state, verbose=0), {
-                        'iterations': hp.choice('iterations_cb', [100, 200, 500]),
-                        'learning_rate': hp.uniform('learning_rate_cb', 0.01, 0.2),
-                        'depth': hp.choice('depth_cb', [4, 6, 8])
+                        'iterations': hp.choice('iterations', [100, 200, 500]),
+                        'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                        'depth': hp.choice('depth', [4, 6, 8])
                     })
         else:
             raise ValueError(f"Unsupported task_type: {self.task_type}")
