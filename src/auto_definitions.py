@@ -31,10 +31,12 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from scipy.stats import shapiro, spearmanr, levene
 from sklearn.metrics import roc_auc_score
+from sklearn.feature_extraction import FeatureHasher
 import scipy.sparse.linalg
 import scipy.sparse
 import warnings
 warnings.filterwarnings("ignore")
+seed = 505
 
 def safe_compute_data_stats(self):
     X, y = self.X[self.ix_statistics], self.y[self.ix_statistics]
@@ -143,7 +145,7 @@ class DataProfiler:
             data = self.df[col].dropna()
             if len(data) >= 3:
                 # For larger datasets, we take a sample to avoid performance issues.
-                sample = data.sample(n=min(len(data), 4999), random_state=1)
+                sample = data.sample(n=min(len(data), 4999), random_state=seed)
                 stat, p_value = stats.shapiro(sample)
                 is_normal = p_value > p_value_threshold
                 normality_results[col] = {
@@ -209,13 +211,28 @@ class ModelDataProfiler:
    - Return final recommendation
 
     """
-    def __init__(self, data, target, categorical_features_order=None, verbose=True):
+    def __init__(self, data, target, categorical_features_order=None, verbose=True,
+                 high_cardinality_strategy: str = 'grouping',
+                 cardinality_threshold: int = 50,
+                 n_hashing_features: int = 20,
+                 rare_category_threshold: float = 0.01):
         self.verbose = verbose
         self.data = self._load_data(data, verbose=verbose)
         self.target = target
         self.cat_order = categorical_features_order
         self.model = None
         self.results = {}
+        self.high_cardinality_strategy = high_cardinality_strategy
+        self.cardinality_threshold = cardinality_threshold
+        self.n_hashing_features = n_hashing_features
+        self.rare_category_threshold = rare_category_threshold
+
+        # Attributes for strategies
+        self.low_cardinality_features_: List[str] = []
+        self.high_cardinality_features_: List[str] = []
+        self.frequent_categories_: Dict[str, List[str]] = {}
+        self.hasher_: FeatureHasher = None
+
         self._identify_feature_types()
 
     def _identify_feature_types(self):
@@ -518,10 +535,22 @@ class ModelDataProfiler:
                     if self.verbose: print(f"    -> Column '{col}' has high cardinality but {' and '.join(reason)}. Keeping as a numerical feature.")
 
         # --- Impute missing values ---
+        # This step is now split: learn imputation, then apply it after separating features.
+        self.imputation_values_ = {}
+        numerical_to_impute = [col for col in self.numerical_features if col not in unique_numerical_ids]
+        categorical_to_impute = [col for col in self.categorical_features if col not in unique_categorical_keys and col not in date_features]
+
+        for col in numerical_to_impute:
+            if df[col].isnull().any():
+                self.imputation_values_[col] = df[col].median()
+
+        for col in categorical_to_impute:
+            if df[col].isnull().any():
+                self.imputation_values_[col] = df[col].mode()[0]
+
+        # --- Apply imputation and create indicators ---
         if self.verbose: print("Imputing missing values for baseline modeling...")
-        # Impute numerical features with the median
-        # Iterate over a copy of the list because we will be modifying it
-        for col in self.numerical_features[:]:
+        for col, value in self.imputation_values_.items():
             if df[col].isnull().any():
                 # Create a new binary indicator feature for missing values
                 indicator_col_name = f"{col}_was_missing"
@@ -529,30 +558,63 @@ class ModelDataProfiler:
                 self.numerical_features.append(indicator_col_name)
                 if self.verbose: print(f"    -> Created missing indicator column '{indicator_col_name}' for '{col}'.")
 
-                median_val = df[col].median()
-                df[col].fillna(median_val, inplace=True)
-                if self.verbose: print(f"    -> Imputed NaNs in numerical column '{col}' with median ({median_val}).")
-        # Impute categorical features with the mode
-        for col in self.categorical_features[:]:
-            if df[col].isnull().any():
-                # Create a new binary indicator feature for missing values
-                indicator_col_name = f"{col}_was_missing"
-                df[indicator_col_name] = df[col].isnull().astype(int)
-                self.numerical_features.append(indicator_col_name) # this needs to be removed.
-                if self.verbose: print(f"    -> Created missing indicator column '{indicator_col_name}' for '{col}'.")
-
-                mode_val = df[col].mode()[0]
-                df[col].fillna(mode_val, inplace=True)
-                if self.verbose: print(f"    -> Imputed NaNs in categorical column '{col}' with mode ('{mode_val}').")
+                df[col].fillna(value, inplace=True)
+                if self.verbose: print(f"    -> Imputed NaNs in column '{col}' with '{value}'.")
  
+        # --- Separate categorical features by cardinality ---
+        for col in categorical_to_impute:
+            if df[col].nunique() > self.cardinality_threshold:
+                self.high_cardinality_features_.append(col)
+            else:
+                self.low_cardinality_features_.append(col)
+
         # Prepare X and y
         if self.verbose: print("Preparing data for modeling (including one-hot encoding)...")
         
-        # Separate numerical and categorical dataframes
-        X_numerical = df[self.numerical_features].copy()
-        X_categorical = pd.get_dummies(df[self.categorical_features], drop_first=True)
-        print(list(X_categorical.columns))
-        X = pd.concat([X_numerical, X_categorical], axis=1)
+        processed_parts = []
+        
+        # Part 1: Numerical and missing indicator columns
+        final_numerical_features = [f for f in self.numerical_features if f not in unique_numerical_ids]
+        missing_indicators = [col for col in df.columns if col.endswith('_was_missing')]
+        processed_parts.append(df[final_numerical_features + missing_indicators].reset_index(drop=True))
+
+        # Part 2: Low-cardinality features (always one-hot encoded)
+        if self.low_cardinality_features_:
+            if self.verbose: print(f"One-hot encoding low-cardinality: {self.low_cardinality_features_}")
+            df_low_card = pd.get_dummies(df[self.low_cardinality_features_], columns=self.low_cardinality_features_, drop_first=True)
+            processed_parts.append(df_low_card.reset_index(drop=True))
+
+        # Part 3: High-cardinality features (apply chosen strategy)
+        if self.high_cardinality_features_:
+            df_high_card = df[self.high_cardinality_features_]
+
+            if self.high_cardinality_strategy == 'grouping':
+                if self.verbose: print("Strategy: Grouping rare categories.")
+                for col in self.high_cardinality_features_:
+                    counts = df_high_card[col].value_counts(normalize=True)
+                    frequent_cats = counts[counts >= self.rare_category_threshold].index.tolist()
+                    self.frequent_categories_[col] = frequent_cats
+                    if self.verbose: print(f"'{col}': Found {len(frequent_cats)} frequent categories.")
+                    df_high_card[col] = df_high_card[col].where(df_high_card[col].isin(frequent_cats), 'rare_category')
+                
+                df_high_card_processed = pd.get_dummies(df_high_card, columns=self.high_cardinality_features_, drop_first=True)
+                processed_parts.append(df_high_card_processed.reset_index(drop=True))
+
+            elif self.high_cardinality_strategy == 'hashing':
+                if self.verbose: print(f"Strategy: Feature Hashing to {self.n_hashing_features} features.")
+                self.hasher_ = FeatureHasher(n_features=self.n_hashing_features, input_type='dict')
+                dict_rows = df_high_card.to_dict(orient='records')
+                hashed_features = self.hasher_.fit_transform(dict_rows)
+                df_hashed = pd.DataFrame(
+                    hashed_features.toarray(),
+                    columns=[f'hash_{i}' for i in range(self.n_hashing_features)]
+                )
+                processed_parts.append(df_hashed.reset_index(drop=True))
+            else:
+                raise ValueError(f"Unknown high_cardinality_strategy: '{self.high_cardinality_strategy}'")
+
+        # Combine all processed parts
+        X = pd.concat(processed_parts, axis=1)
 
         y = df[self.target]
         if self.verbose: print(f"Data prepared. Shape of X: {X.shape}")
