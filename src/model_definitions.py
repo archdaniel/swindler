@@ -42,7 +42,7 @@ except ImportError:
     cb = None
 
 try:
-    from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
+    from hyperopt import fmin, tpe, hp, STATUS_OK, Trials, space_eval
     from sklearn.model_selection import cross_val_score
 except ImportError:
     hp = None
@@ -230,7 +230,8 @@ class ModelTrainer:
                         return {'loss': -score, 'status': STATUS_OK}
 
                     trials = Trials()
-                    best_params = fmin(fn=objective, space=params, algo=tpe.suggest, max_evals=25, trials=trials, rstate=np.random.default_rng(self.random_state))
+                    best_params = fmin(fn=objective, space=params, algo=tpe.suggest, max_evals=10, trials=trials, rstate=np.random.default_rng(self.random_state))
+                    best_params = space_eval(params, best_params)
                 else:
                     raise ValueError(f"Unsupported hyperparam_strategy: {self.hyperparam_strategy}")
 
