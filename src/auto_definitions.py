@@ -395,43 +395,66 @@ class ModelDataProfiler:
             preds = model.predict_proba(X)[:, 1]
         if verbose: print(f"Baseline model fitted: {model_type}.")
         return model, preds, model_type
-
-    def _residual_analysis(self, y, preds, model_type, verbose: bool = True):
-        residuals = y - preds
+    
+    def _residual_analysis(self, X, y, preds, model_type, verbose: bool = True):
         if verbose: print("Performing residual analysis...")
         results = {}
-
-        # Normality tests
-        shapiro_p = stats.shapiro(residuals.sample(min(5000, len(residuals))))[1]
-        ad_stat, ad_p = normal_ad(residuals)
-        results['normality'] = {'shapiro_p': shapiro_p, 'anderson_darling_p': ad_p}
-
-        # Homoscedasticity (Breusch-Pagan)
-        X = sm.add_constant(preds)
-        lm, lm_pvalue, f, f_pvalue = het_breuschpagan(residuals, X)
-        results['homoscedasticity'] = {'LM pvalue': lm_pvalue, 'F pvalue': f_pvalue}
-
-        # Autocorrelation (Durbin–Watson)
-        dw = durbin_watson(residuals)
-        results['autocorrelation'] = {'durbin_watson': dw}
-
-        # Performance
+    
         if model_type == "regression":
+            residuals = y - preds
+            # Normality tests
+            shapiro_p = stats.shapiro(residuals.sample(min(5000, len(residuals))))[1]
+            ad_stat, ad_p = normal_ad(residuals)
+            results['normality'] = {'shapiro_p': shapiro_p, 'anderson_darling_p': ad_p}
+    
+            # Homoscedasticity (Breusch-Pagan)
+            X_const = sm.add_constant(preds)
+            lm, lm_pvalue, f, f_pvalue = het_breuschpagan(residuals, X_const)
+            results['homoscedasticity'] = {'LM pvalue': lm_pvalue, 'F pvalue': f_pvalue}
+    
+            # Autocorrelation (Durbin–Watson)
+            dw = durbin_watson(residuals)
+            results['autocorrelation'] = {'durbin_watson': dw}
+    
+            # Performance
             results['performance'] = {'R2': r2_score(y, preds)}
-        else:
+    
+            # Visual plots
+            self._plot_diagnostics(y, preds, residuals, model_type, verbose=verbose)
+    
+            # Recommendation
+            if shapiro_p < 0.05 or f_pvalue < 0.05 or dw < 1.5 or dw > 2.5:
+                recommendation = "⚠️ Non-parametric or robust model suggested (e.g. tree-based, Huber)"
+            else:
+                recommendation = "✅ Parametric assumptions reasonable"
+            results['recommendation'] = recommendation
+    
+        elif model_type == "classification":
+            # For classification, we check different assumptions
             results['performance'] = {'log_loss': log_loss(y, preds)}
+            
+            # 1. No multicollinearity (VIF)
+            vif_data = pd.DataFrame()
+            vif_data["feature"] = X.columns
+            vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(len(X.columns))]
+            results['multicollinearity'] = {'vif': vif_data.to_dict('records')}
+            high_vif = vif_data[vif_data['VIF'] > 5]
+            
+            # 2. Independence of errors (Durbin-Watson on Pearson residuals)
+            # This is a proxy, as DW is primarily for time series. It can hint at dependency.
+            logit_model = sm.Logit(y, sm.add_constant(X)).fit(disp=0)
+            pearson_residuals = logit_model.resid_pearson
+            dw = durbin_watson(pearson_residuals)
+            results['autocorrelation'] = {'durbin_watson': dw}
 
-        # Visual plots
-        self._plot_diagnostics(y, preds, residuals, model_type, verbose=verbose)
+            # Recommendation
+            if not high_vif.empty or dw < 1.5 or dw > 2.5:
+                recommendation = "⚠️ Potential multicollinearity or error dependency. Non-linear model (e.g., tree-based) might be more robust."
+            else:
+                recommendation = "✅ Linear model assumptions seem reasonable. Logistic Regression is a good starting point."
+            results['recommendation'] = recommendation
 
-        # Recommendation
-        if shapiro_p < 0.05 or f_pvalue < 0.05 or dw < 1.5 or dw > 2.5:
-            recommendation = "⚠️ Non-parametric or robust model suggested (e.g. tree-based, Huber)"
-        else:
-            recommendation = "✅ Parametric assumptions reasonable"
-        results['recommendation'] = recommendation
         if verbose: print("Finished residual analysis.")
-
         return results
 
     def _plot_diagnostics(self, y, preds, residuals, model_type, verbose: bool = True):
@@ -621,7 +644,7 @@ class ModelDataProfiler:
         
         # Fit model and analyze residuals
         self.model, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
-        self.results = self._residual_analysis(y, preds, model_type, verbose=self.verbose)
+        self.results = self._residual_analysis(X, y, preds, model_type, verbose=self.verbose)
         if self.verbose: print("ModelDataProfiler run finished.")
         return (
             self.results, 
