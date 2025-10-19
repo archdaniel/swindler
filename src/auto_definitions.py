@@ -454,6 +454,24 @@ class ModelDataProfiler:
                 recommendation = "✅ Linear model assumptions seem reasonable. Logistic Regression is a good starting point."
             results['recommendation'] = recommendation
 
+            # Visual plot for classification
+            if verbose: print("Generating residuals vs. fitted plot for classification...")
+            plt.scatter(preds, pearson_residuals, alpha=0.5)
+            plt.axhline(0, color='red', linestyle='--')
+            plt.xlabel('Fitted probabilities')
+            plt.ylabel('Pearson residuals')
+            plt.title('Residuals vs Fitted (Logistic)')
+            plt.show()
+
+            # Histogram of Deviance Residuals
+            if verbose: print("Generating histogram of deviance residuals...")
+            plt.hist(logit_model.resid_deviance, bins=30, edgecolor='k', alpha=0.7)
+            plt.title('Histogram of Deviance Residuals')
+            plt.xlabel('Residuals')
+            plt.ylabel('Frequency')
+            plt.show()
+
+
         if verbose: print("Finished residual analysis.")
         return results
 

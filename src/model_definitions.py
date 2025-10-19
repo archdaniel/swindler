@@ -13,9 +13,9 @@ from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSe
 from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import (
-    roc_auc_score, f1_score, precision_score, recall_score, accuracy_score,
-    r2_score, mean_squared_error, mean_absolute_error,
-    roc_curve, confusion_matrix
+    roc_auc_score, f1_score, precision_score, recall_score, accuracy_score, r2_score,
+    mean_squared_error, mean_absolute_error, roc_curve, confusion_matrix,
+    RocCurveDisplay, ConfusionMatrixDisplay
 )
 
 seed = 505
@@ -331,6 +331,30 @@ class ModelTrainer:
         ax.legend(title='Metric', bbox_to_anchor=(1.05, 1), loc='upper left')
         fig.tight_layout()
         plt.show()
+
+        # --- Classification-specific plots for the best model ---
+        if self.task_type == 'classification':
+            X_train, X_test, y_train, y_test = train_test_split(
+                self.X, self.y, test_size=self.test_size, random_state=self.random_state,
+                stratify=(self.y if self.task_type == 'classification' else None)
+            )
+
+            # Plot 2: Confusion Matrix
+            if self.verbose: print(f"\nGenerating confusion matrix for {self.best_model_name_}...")
+            fig_cm, ax_cm = plt.subplots(figsize=(8, 6))
+            cm_display = ConfusionMatrixDisplay.from_estimator(self.best_model_, X_test, y_test, ax=ax_cm, cmap=plt.cm.Blues)
+            ax_cm.set_title(f'Confusion Matrix for {self.best_model_name_}')
+            plt.show()
+
+            # Plot 3: ROC Curve
+            if self.verbose: print(f"\nGenerating ROC curve for {self.best_model_name_}...")
+            fig_roc, ax_roc = plt.subplots(figsize=(8, 6))
+            roc_display = RocCurveDisplay.from_estimator(self.best_model_, X_test, y_test, ax=ax_roc, name=self.best_model_name_)
+            ax_roc.plot([0, 1], [0, 1], 'k--', label='Chance level (AUC = 0.5)')
+            ax_roc.set_title(f'ROC Curve for {self.best_model_name_}')
+            ax_roc.legend()
+            plt.show()
+
 
         # Plot 2: Learning Curve for the best model
         if self.verbose: print(f"\nGenerating learning curve for {self.best_model_name_}...")
