@@ -260,22 +260,16 @@ class ModelDataProfiler:
         else:
             raise ValueError("Data must be DataFrame or file path.")
 
-    def profile_data_encoding(self, fix=True):
+    def profile_data_encoding(self):
         """
-        Detects, describes, and optionally fixes encoding/storage anomalies in dataset features.
-
-        Parameters
-        ----------
-        fix : bool, default=False
-            If True, returns a cleaned copy of the dataframe with detected issues fixed automatically.
-            Otherwise, only reports issues.
+        Detects, describes, and fixes encoding/storage anomalies in dataset features.
 
         Returns
         -------
         issues : dict
             Dictionary describing anomalies for each column.
-        cleaned_df : pd.DataFrame (if fix=True)
-            Cleaned copy of dataframe with numeric-like strings converted.
+        cleaned_df : pd.DataFrame
+            A cleaned copy of the dataframe with detected issues fixed automatically.
         """
         df = self.data.copy()
         issues = {}
@@ -283,6 +277,7 @@ class ModelDataProfiler:
         pct_pattern = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%$")
         curr_pattern = re.compile(r"^\s*[$€]\s*([-+]?\d*\.?\d+)")
         emp_length_pattern = re.compile(r'year|years')
+        messy_numeric_pattern = re.compile(r'[<>]|\d+\s*\+\s*[a-zA-Z]+') # e.g., '< 1 year', '10+ years'
 
         for col in df.columns:
             series = df[col]
@@ -338,24 +333,23 @@ class ModelDataProfiler:
                     col_issues.append("⚠️ Mixed data types detected (numeric + non-numeric or inconsistent formats).")
 
             # === OPTIONAL FIXES ===
-            if fix and series.dtype == "object":
+            if series.dtype == "object":
                 fixed_series = series.astype(str).str.strip()
 
-                # --- Specific Fixes ---
-                # Fix employment length '10+ years', '< 1 year'
-                if emp_length_pattern.search(str(series.iloc[0])):
-                     # Check if a sample of the column matches the pattern
-                    sample_matches = series.dropna().sample(min(10, len(series.dropna()))).astype(str).str.contains(emp_length_pattern).mean()
-                    if sample_matches > 0.7:
-                        col_issues.append("📅 Appears to be employment length. Converting to numeric.")
-                        # Vectorized approach to parse employment length
-                        # Extract numbers, e.g., '10+ years' -> '10'
-                        numbers = series.str.extract(r'(\d+)', expand=False).astype(float)
-                        # Handle special cases like '< 1 year' -> 0.5
-                        # and 'n/a' -> NaN
-                        fixed_col = np.where(series.str.contains('< 1', na=False), 0.5, numbers)
-                        df[col] = np.where(series.str.contains('n/a', na=False), np.nan, fixed_col)
-                        continue # Move to next column
+                # --- General Fixes for Complex Patterns ---
+
+                # Fix messy numeric strings like '< 1 year' or '10+ years'
+                # Check if a sample of the column matches the complex pattern
+                sample_matches = series.dropna().sample(min(20, len(series.dropna()))).astype(str).str.contains(messy_numeric_pattern).mean()
+                if sample_matches > 0.5:
+                    col_issues.append("🛠️ Contains complex numeric strings (e.g., '< 1', '10+'). Converting to numeric.")
+                    # Vectorized approach to parse messy numeric values
+                    # Extract numbers, e.g., '10+ years' -> '10'
+                    numbers = series.str.extract(r'(\d+\.?\d*)', expand=False).astype(float)
+                    # Handle special cases like '< 1' -> 0.5 and 'n/a' -> NaN
+                    fixed_col = np.where(series.str.contains('<', na=False), 0.5, numbers)
+                    df[col] = np.where(series.str.contains('n/a', na=False), np.nan, fixed_col)
+                    continue # Move to next column
 
                 # Fix date-like strings 'Feb-2007'
                 converted_dates = pd.to_datetime(series, errors='coerce')
@@ -399,10 +393,7 @@ class ModelDataProfiler:
                 for msg in v:
                     print(f"  - {msg}")
 
-        if fix:
-            return issues, df
-        else:
-            return issues
+        return issues, df
             
     def _fit_baseline_model(self, X, y, verbose: bool = True):
         """Automatically select regression or classification baseline."""
@@ -542,7 +533,7 @@ class ModelDataProfiler:
  
         # --- Use profile_data_encoding to clean the data first ---
         if self.verbose: print("Running data encoding profiling and fixing...")
-        issues, df = self.profile_data_encoding(fix=True)
+        issues, df = self.profile_data_encoding()
         if self.verbose: print("Data encoding fixing complete.")
 
         # --- Re-identify feature types based on the cleaned dataframe ---
