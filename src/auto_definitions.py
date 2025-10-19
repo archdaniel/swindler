@@ -434,15 +434,18 @@ class ModelDataProfiler:
             results['performance'] = {'log_loss': log_loss(y, preds)}
             
             # 1. No multicollinearity (VIF)
+            # Ensure X is purely numeric for VIF calculation
+            X_numeric = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+
             vif_data = pd.DataFrame()
-            vif_data["feature"] = X.columns
-            vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(len(X.columns))]
+            vif_data["feature"] = X_numeric.columns
+            vif_data["VIF"] = [variance_inflation_factor(X_numeric.values, i) for i in range(len(X_numeric.columns))]
             results['multicollinearity'] = {'vif': vif_data.to_dict('records')}
             high_vif = vif_data[vif_data['VIF'] > 5]
             
             # 2. Independence of errors (Durbin-Watson on Pearson residuals)
             # This is a proxy, as DW is primarily for time series. It can hint at dependency.
-            logit_model = sm.Logit(y, sm.add_constant(X)).fit(disp=0)
+            logit_model = sm.Logit(y, sm.add_constant(X_numeric)).fit(disp=0)
             pearson_residuals = logit_model.resid_pearson
             dw = durbin_watson(pearson_residuals)
             results['autocorrelation'] = {'durbin_watson': dw}
