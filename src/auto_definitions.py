@@ -212,10 +212,10 @@ class ModelDataProfiler:
 
     """
     def __init__(self, data, target, categorical_features_order=None, verbose=True,
-                 high_cardinality_strategy: str = 'grouping',
+                 high_cardinality_strategy: str = 'hashing',
                  cardinality_threshold: int = 50,
                  n_hashing_features: int = 20,
-                 rare_category_threshold: float = 0.01):
+                 rare_category_threshold: float = 0.00):
         self.verbose = verbose
         self.data = self._load_data(data, verbose=verbose)
         self.target = target
@@ -247,7 +247,7 @@ class ModelDataProfiler:
 
     def _load_data(self, data, verbose: bool = True):
         if isinstance(data, pd.DataFrame):
-            if verbose: print("Loading data for ModelDataProfiler from DataFrame... really...")
+            if verbose: print("Loading data for ModelDataProfiler from DataFrame...")
             return data.copy()
         elif isinstance(data, str):
             if verbose: print(f"Loading data for ModelDataProfiler from file: {data}...")
@@ -263,43 +263,55 @@ class ModelDataProfiler:
     def profile_data_encoding(self):
         """
         Detects, describes, and fixes encoding/storage anomalies in dataset features.
-
-        Returns
-        -------
-        issues : dict
-            Dictionary describing anomalies for each column.
-        cleaned_df : pd.DataFrame
-            A cleaned copy of the dataframe with detected issues fixed automatically.
+        Now preserves date-like columns as datetime dtype (not converted to numeric or one-hot encoded).
         """
         df = self.data.copy()
         issues = {}
+    
+        # Regex patterns
         unit_pattern = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*[a-zA-Z]+")  # e.g., '36 months', '5kg'
         pct_pattern = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%$")
         curr_pattern = re.compile(r"^\s*[$€]\s*([-+]?\d*\.?\d+)")
         emp_length_pattern = re.compile(r'year|years')
         messy_numeric_pattern = re.compile(r'[<>]|\d+\s*\+\s*[a-zA-Z]+') # e.g., '< 1 year', '10+ years'
-
+    
         for col in df.columns:
             series = df[col]
             col_issues = []
-
-            # --- Detect numeric-like strings with symbols (%, $, commas)
+    
+            # Skip target column
+            if col == self.target:
+                continue
+    
+            # --- Detect and preserve date-like columns ---
+            if series.dtype == "object" or pd.api.types.is_string_dtype(series):
+                converted_dates = pd.to_datetime(series, errors='coerce', infer_datetime_format=True)
+                # Treat as date if at least 80% of non-null values convert successfully
+                if converted_dates.notna().sum() / max(series.notna().sum(), 1) > 0.8:
+                    col_issues.append("📅 Appears to be a date. Converting to datetime (kept for time-based modeling).")
+                    df[col] = converted_dates
+                    if self.verbose:
+                        print(f"📅 Column '{col}' detected as datetime and converted.")
+                    issues[col] = col_issues
+                    continue  # Skip other transformations
+    
+            # --- Detect numeric-like strings with symbols (%, $, commas) ---
             if series.dtype == "object":
                 suspicious_mask = series.astype(str).str.contains(r'[%,$€]|[0-9]+,[0-9]+', regex=True)
                 if suspicious_mask.mean() > 0.1:
                     col_issues.append(
                         f"⚠️ {round(100*suspicious_mask.mean(),1)}% of entries look numeric but contain symbols (%, $, €, commas)."
                     )
-
-            # --- Detect numeric + unit patterns like "36 months"
+    
+            # --- Detect numeric + unit patterns like "36 months" ---
             if series.dtype == "object":
                 num_unit_mask = series.astype(str).str.match(unit_pattern)
                 if num_unit_mask.mean() > 0.1:
                     col_issues.append(
                         f"📏 {round(100*num_unit_mask.mean(),1)}% of values appear to mix numbers and units (e.g. '36 months', '5kg')."
                     )
-
-            # --- Detect possible numeric stored as string
+    
+            # --- Detect possible numeric stored as string ---
             if series.dtype == "object":
                 cleaned_str = (
                     series.astype(str)
@@ -310,89 +322,77 @@ class ModelDataProfiler:
                 numeric_mask = cleaned_str.str.replace(".", "", 1).str.isnumeric()
                 if numeric_mask.mean() > 0.9:
                     col_issues.append("💡 Likely numeric but stored as string (most values convertible to float).")
-
-            # --- Detect symbolic encodings
+    
+            # --- Detect symbolic encodings ---
             if series.dtype == "object":
                 values = series.astype(str)
                 if values.str.endswith("%").mean() > 0.5:
                     col_issues.append("🧮 Appears to store percentages as text (values ending with '%').")
                 if values.str.contains(r"\$|€").mean() > 0.5:
                     col_issues.append("💰 Appears to store currency values as text (contains $ or €).")
-
-            # --- Detect numeric scale mismatches
+    
+            # --- Detect numeric scale mismatches ---
             if pd.api.types.is_numeric_dtype(series):
                 if series.max() > 10 and series.mean() < 1:
                     col_issues.append("📊 Possible % stored as 0–100 instead of 0–1.")
                 elif series.max() <= 1 and series.mean() < 0.1:
-                    col_issues.append("📉 Possible % stored as 0–1 instead of 0–100.") # wait...
-
-            # --- Detect mixed types
+                    col_issues.append("📉 Possible % stored as 0–1 instead of 0–100.")
+    
+            # --- Detect mixed types ---
             if series.dtype == "object":
                 unique_types = series.dropna().map(type).nunique()
                 if unique_types > 1:
                     col_issues.append("⚠️ Mixed data types detected (numeric + non-numeric or inconsistent formats).")
-
-            # === OPTIONAL FIXES ===
+    
+            # === Fixes ===
             if series.dtype == "object":
                 fixed_series = series.astype(str).str.strip()
-
-                # --- General Fixes for Complex Patterns ---
-
+    
                 # Fix messy numeric strings like '< 1 year' or '10+ years'
-                # Check if a sample of the column matches the complex pattern
-                sample_matches = series.dropna().sample(min(20, len(series.dropna()))).astype(str).str.contains(messy_numeric_pattern).mean()
-                if sample_matches > 0.5:
-                    col_issues.append("🛠️ Contains complex numeric strings (e.g., '< 1', '10+'). Converting to numeric.")
-                    # Vectorized approach to parse messy numeric values
-                    # Extract numbers, e.g., '10+ years' -> '10'
-                    numbers = series.str.extract(r'(\d+\.?\d*)', expand=False).astype(float)
-                    # Handle special cases like '< 1' -> 0.5 and 'n/a' -> NaN
-                    fixed_col = np.where(series.str.contains('<', na=False), 0.5, numbers)
-                    df[col] = np.where(series.str.contains('n/a', na=False), np.nan, fixed_col)
-                    continue # Move to next column
-
-                # Fix date-like strings 'Feb-2007'
-                converted_dates = pd.to_datetime(series, errors='coerce')
-                if converted_dates.notna().sum() / series.notna().sum() > 0.8:
-                    col_issues.append("📅 Appears to be a date. Converting to datetime objects.")
-                    df[col] = converted_dates
+                sample_matches = series.dropna().astype(str).head(20).str.contains(messy_numeric_pattern).mean()
+                if sample_matches > 0.5 or series.astype(str).str.contains(emp_length_pattern).mean() > 0.5:
+                    col_issues.append("🛠️ Contains complex numeric strings (e.g., '< 1', '10+ years'). Converting to numeric scale.")
+                    numbers = series.astype(str).str.extract(r'(\d+\.?\d*)', expand=False).astype(float)
+                    fixed_col = np.where(series.astype(str).str.contains('<', na=False), 0.5, numbers)
+                    df[col] = np.where(series.astype(str).str.contains('n/a', na=False), np.nan, fixed_col)
+                    issues[col] = col_issues
                     continue
-
+    
                 # Fix percentages like "7.5%" → 0.075
                 fixed_series = fixed_series.apply(
                     lambda x: float(pct_pattern.match(x).group(1)) / 100
                     if isinstance(x, str) and pct_pattern.match(x)
                     else x
                 )
-
+    
                 # Fix currency "$100" → 100.0
                 fixed_series = fixed_series.apply(
                     lambda x: float(curr_pattern.match(x).group(1))
                     if isinstance(x, str) and curr_pattern.match(x)
                     else x
                 )
-
+    
                 # Fix numeric + units "36 months" → 36.0
                 fixed_series = fixed_series.apply(
                     lambda x: float(unit_pattern.match(x).group(1))
                     if isinstance(x, str) and unit_pattern.match(x)
                     else x
                 )
-
-                # Try to coerce remaining numeric strings
+    
+                # Try coercing remaining numeric strings
                 fixed_series = pd.to_numeric(fixed_series, errors='ignore')
                 df[col] = fixed_series
-
+    
             if col_issues:
                 issues[col] = col_issues
-
+    
         if self.verbose:
             print("\n=== DATA ENCODING PROFILING REPORT ===")
             for k, v in issues.items():
                 print(f"\n📁 Column: {k}")
                 for msg in v:
                     print(f"  - {msg}")
-
+        self.date_features_ = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
         return issues, df
             
     def _fit_baseline_model(self, X, y, verbose: bool = True):
@@ -411,6 +411,20 @@ class ModelDataProfiler:
             preds = model.predict_proba(X)[:, 1]
         if verbose: print(f"Baseline model fitted: {model_type}.")
         return model, preds, model_type
+        
+    def diagnose_singular_matrix(self, X):
+        Xc = sm.add_constant(X)
+        XtX = Xc.T @ Xc
+        eigvals = np.linalg.eigvals(XtX)
+        condition_number = np.max(eigvals) / np.min(eigvals)
+        print(f"⚙️ Condition number: {condition_number:.2e}")
+        if condition_number > 1e12:
+            print("⚠️ Very high condition number — near-singular matrix.")
+        # Identify near-linear dependencies
+        U, s, Vt = np.linalg.svd(Xc)
+        near_zero = np.where(s < 1e-10)[0]
+        if len(near_zero) > 0:
+            print(f"Columns involved in singularities (indices): {near_zero}")
     
     def _residual_analysis(self, X, y, preds, model_type, verbose: bool = True):
         if verbose: print("Performing residual analysis...")
@@ -446,22 +460,114 @@ class ModelDataProfiler:
             results['recommendation'] = recommendation
     
         elif model_type == "classification":
-            # For classification, we check different assumptions
+            # For classification, check model assumptions differently
             results['performance'] = {'log_loss': log_loss(y, preds)}
-            
-            # 1. No multicollinearity (VIF)
-            # Ensure X is purely numeric for VIF calculation
-            X_numeric = X.apply(pd.to_numeric, errors='coerce').fillna(0)
-
+        
+            # --- 1. Check multicollinearity (VIF) ---
+            if self.verbose:
+                print("🧮 Checking multicollinearity before Logit fit... X shape:", X.shape)
+        
+            X_numeric = X.select_dtypes(include=[np.number])
             vif_data = pd.DataFrame()
             vif_data["feature"] = X_numeric.columns
             vif_data["VIF"] = [variance_inflation_factor(X_numeric.values, i) for i in range(len(X_numeric.columns))]
             results['multicollinearity'] = {'vif': vif_data.to_dict('records')}
-            high_vif = vif_data[vif_data['VIF'] > 5]
+        
+            # --- Detect perfect correlations ---
+            corr_matrix = X_numeric.corr().abs()
+            perfect_pairs = []
+            for col1 in corr_matrix.columns:
+                for col2 in corr_matrix.columns:
+                    if col1 != col2:
+                        try:
+                            val = float(corr_matrix.loc[col1, col2])
+                            if val >= 0.9999:
+                                perfect_pairs.append((col1, col2))
+                        except Exception:
+                            continue  # in case of malformed correlations (e.g., NaN, Series)
+
+        
+            if len(perfect_pairs) > 0:
+                print(f"⚠️ Perfectly correlated column pairs: {perfect_pairs}")
+        
+            # --- Identify high VIF columns ---
+            high_vif = vif_data[vif_data['VIF'] > 10]
+            if not high_vif.empty:
+                print(f"⚠️ High VIF features (possible multicollinearity):\n{high_vif}")
+        
+            # --- Target correlation scoring ---
+            if pd.api.types.is_numeric_dtype(y):
+                y_numeric = y
+            else:
+                y_numeric = pd.factorize(y)[0]
+        
+            target_corr = {}
+            for col in X_numeric.columns:
+                try:
+                    target_corr[col] = abs(np.corrcoef(X_numeric[col], y_numeric)[0, 1])
+                except Exception:
+                    target_corr[col] = 0.0
+        
+            # --- Drop weaker feature per correlated pair ---
+            unique_pairs = []
+            seen = set()
+            for a, b in perfect_pairs:
+                if (b, a) not in seen:
+                    unique_pairs.append((a, b))
+                    seen.add((a, b))
+        
+            perfect_to_drop = []
+            for a, b in unique_pairs:
+                corr_a = target_corr.get(a, 0)
+                corr_b = target_corr.get(b, 0)
+                drop_col = a if corr_a < corr_b else b
+                perfect_to_drop.append(drop_col)
+        
+            # --- High VIF features ---
+            vif_to_drop = high_vif.loc[high_vif['VIF'].replace(np.inf, 9999) > 10, 'feature'].tolist()
+        
+            # --- Combine & deduplicate ---
+            cols_to_drop = list(set(perfect_to_drop + vif_to_drop))
+            if cols_to_drop:
+                print(f"⚠️ Dropping {len(cols_to_drop)} problematic columns before fitting Logit:")
+                for c in cols_to_drop:
+                    print(f"   - {c} (corr with target: {target_corr.get(c, 0):.3f})")
+                X_numeric = X_numeric.drop(columns=cols_to_drop, errors='ignore')
+        
+            # --- Drop constant/near-constant columns safely ---
+            constant_cols = []
+            for c in X_numeric.columns:
+                try:
+                    # Ensure unique name access (avoids Series ambiguity)
+                    col_data = X_numeric.loc[:, c]
+                    # If duplicates, aggregate first column only
+                    if isinstance(col_data, pd.DataFrame):
+                        col_data = col_data.iloc[:, 0]
+                    if col_data.nunique(dropna=False) <= 1:
+                        constant_cols.append(c)
+                except Exception as e:
+                    if verbose:
+                        print(f"⚠️ Skipping column {c} in constant check due to: {e}")
+                    continue
             
-            # 2. Independence of errors (Durbin-Watson on Pearson residuals)
-            # This is a proxy, as DW is primarily for time series. It can hint at dependency.
-            logit_model = sm.Logit(y, sm.add_constant(X_numeric)).fit(disp=0)
+            if constant_cols:
+                print(f"⚠️ Dropping constant columns: {constant_cols}")
+                X_numeric = X_numeric.drop(columns=constant_cols, errors='ignore')
+        
+            if self.verbose:
+                print(f"✅ X_numeric reduced to {X_numeric.shape[1]} features after correlation-based cleaning.")
+        
+            # --- 2. Independence of errors (Durbin-Watson) ---
+            try:
+                self.diagnose_singular_matrix(X_numeric)
+                logit_model = sm.Logit(y, sm.add_constant(X_numeric)).fit(disp=0)
+            except np.linalg.LinAlgError:
+                print("⚠️ Singular matrix detected. Retrying after dropping duplicates.")
+                X_numeric = X_numeric.loc[:, ~X_numeric.T.duplicated()]
+                self.diagnose_singular_matrix(X_numeric)
+
+                logit_model = sm.Logit(y, sm.add_constant(X_numeric)).fit(disp=0)
+            resid_deviance_approx = np.sign(logit_model.resid_pearson) * np.sqrt(np.abs(logit_model.resid_pearson))
             pearson_residuals = logit_model.resid_pearson
             dw = durbin_watson(pearson_residuals)
             results['autocorrelation'] = {'durbin_watson': dw}
@@ -484,8 +590,8 @@ class ModelDataProfiler:
 
             # Histogram of Deviance Residuals
             if verbose: print("Generating histogram of deviance residuals...")
-            plt.hist(logit_model.resid_deviance, bins=30, edgecolor='k', alpha=0.7)
-            plt.title('Histogram of Deviance Residuals')
+            plt.hist(resid_deviance_approx, bins=30, edgecolor='k', alpha=0.7)
+            plt.title('Approximate Deviance Residuals (from Pearson)')
             plt.xlabel('Residuals')
             plt.ylabel('Frequency')
             plt.show()
@@ -546,19 +652,20 @@ class ModelDataProfiler:
         unique_numerical_ids = []
         high_cardinality_threshold = 0.95
 
-        # --- Check for date-like categorical features ---
+        # --- Check for date-like categorical features --- line 355
         if self.verbose: print("Checking for date-like categorical features...")
         for col in self.categorical_features[:]:
-            if df[col].dtype == 'object' or pd.api.types.is_string_dtype(df[col]):
-                try:
-                    converted_series = pd.to_datetime(df[col], errors='coerce')
-                    # If over 95% of non-null values can be converted to dates, treat as a date feature
-                    if converted_series.notna().sum() / df[col].notna().sum() > 0.95:
-                        if self.verbose: print(f"    -> Column '{col}' detected as a date feature.")
-                        date_features.append(col)
-                        self.categorical_features.remove(col)
-                except Exception:
-                    continue # Not a date
+            try:
+                converted_series = pd.to_datetime(df[col], errors='coerce')
+                # print(f"percentage of possible to date conversion: {converted_series.notna().sum() / df[col].notna().sum()}")
+                # If over 95% of non-null values can be converted to dates, treat as a date feature
+                if converted_series.notna().sum() / df[col].notna().sum() > 0.95: # here could be the caveat.
+                    if self.verbose: print(f"    -> Column '{col}' detected as a date feature.")
+                    date_features.append(col)
+                    # print(f'{col} is a date feature. identified in the --- Check for date-like categorical features --- block')
+                    self.categorical_features.remove(col)
+            except Exception:
+                continue # Not a date
 
         # --- Check for high cardinality categorical features (potential unique keys) ---
         if self.verbose: print("Checking for high cardinality categorical features...")
@@ -664,6 +771,7 @@ class ModelDataProfiler:
                 if self.verbose: print(f"Strategy: Feature Hashing to {self.n_hashing_features} features.")
                 self.hasher_ = FeatureHasher(n_features=self.n_hashing_features, input_type='dict')
                 dict_rows = df_high_card.to_dict(orient='records')
+                # print(dict_rows)
                 hashed_features = self.hasher_.fit_transform(dict_rows)
                 df_hashed = pd.DataFrame(
                     hashed_features.toarray(),
@@ -675,10 +783,17 @@ class ModelDataProfiler:
 
         # Combine all processed parts
         X = pd.concat(processed_parts, axis=1)
+        # print(f"X before removing date_like_features: {list(X.columns)}")
+        # Exclude date features from modeling/
+        if hasattr(self, 'date_features_'):
+            X = X.drop(columns=[self.target] + self.date_features_, errors='ignore')
+        else:
+            X = X.drop(columns=[self.target], errors='ignore')
+        # print(f"X after removing date_like_features: {list(X.columns)}")
 
         y = df[self.target]
         if self.verbose: print(f"Data prepared. Shape of X: {X.shape}")
-        
+        X, y = X.align(y, join="inner", axis=0)
         # Fit model and analyze residuals
         self.model, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
         self.results = self._residual_analysis(X, y, preds, model_type, verbose=self.verbose)
