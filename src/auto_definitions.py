@@ -38,6 +38,34 @@ import warnings
 warnings.filterwarnings("ignore")
 seed = 505
 
+def _json_serializer(obj):
+    """
+    JSON serializer for objects not serializable by default json code.
+    - pd.Timestamp -> ISO str
+    - numpy types -> cast to Python native
+    - pandas/numpy arrays -> list
+    """
+    try:
+        import pandas as _pd
+        import numpy as _np
+        if isinstance(obj, _pd.Timestamp):
+            return obj.isoformat()
+        if isinstance(obj, _pd.Series):
+            return obj.tolist()
+        if isinstance(obj, _np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer, )):
+            return int(obj)
+        if isinstance(obj, (np.floating, )):
+            return float(obj)
+        if isinstance(obj, (np.bool_, )):
+            return bool(obj)
+    except Exception:
+        pass
+    # fallback to str
+    return str(obj)
+
+
 def safe_compute_data_stats(self):
     X, y = self.X[self.ix_statistics], self.y[self.ix_statistics]
     preprocess = self.preprocess
