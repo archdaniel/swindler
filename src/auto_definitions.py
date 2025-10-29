@@ -226,6 +226,8 @@ class ModelDataProfiler:
         self.cardinality_threshold = cardinality_threshold
         self.n_hashing_features = n_hashing_features
         self.rare_category_threshold = rare_category_threshold
+        # Force-hash-all flag (explicit numeric check — don't rely on truthiness of 0.0)
+        self.force_hash_all = (self.rare_category_threshold <= 0.0)
 
         # Attributes for strategies
         self.low_cardinality_features_: List[str] = []
@@ -554,7 +556,9 @@ class ModelDataProfiler:
         Xc = sm.add_constant(X)
         XtX = Xc.T @ Xc
         eigvals = np.linalg.eigvals(XtX)
-        condition_number = np.max(eigvals) / np.min(eigvals)
+        # Avoid division by zero if min eigenvalue is zero
+        min_eig = np.min(eigvals) if np.min(eigvals) != 0 else np.min(eigvals) + 1e-20
+        condition_number = np.max(eigvals) / min_eig
         print(f"⚙️ Condition number: {condition_number:.2e}")
         if condition_number > 1e12:
             print("⚠️ Very high condition number — near-singular matrix.")
@@ -607,7 +611,7 @@ class ModelDataProfiler:
             if self.verbose:
                 print("🧮 Checking multicollinearity before Logit fit... X shape:", X.shape)
         
-            X_numeric = X.select_dtypes(include=[np.number])
+            X_numeric = X.select_dtypes(include=[np.number]).copy()
             vif_data = pd.DataFrame()
             vif_data["feature"] = X_numeric.columns
             vif_data["VIF"] = [variance_inflation_factor(X_numeric.values, i) for i in range(len(X_numeric.columns))]
@@ -673,9 +677,6 @@ class ModelDataProfiler:
                 for c in cols_to_drop[:]:
                     print(f"   - {c} (corr with target: {target_corr.get(c, 0):.3f})")
                 X_numeric = X_numeric.drop(columns=cols_to_drop, errors='ignore')
-                # for c in cols_to_drop[:]:
-                #     print(f"   - {c} (corr with target: {target_corr.get(c, 0):.3f}) -- additional columns")
-                # X_numeric = X_numeric.drop(columns=cols_to_drop, errors='ignore')
                 
             # --- Drop constant/near-constant columns safely ---
             constant_cols = []
@@ -700,6 +701,7 @@ class ModelDataProfiler:
             if self.verbose:
                 print(f"✅ X_numeric reduced to {X_numeric.shape[1]} features after correlation-based cleaning.")
 
+            # Persist the features to drop for external use
             self.features_to_drop_ = cols_to_drop + constant_cols
 
             # --- 2. Independence of errors (Durbin-Watson) ---
@@ -873,6 +875,7 @@ class ModelDataProfiler:
         if self.verbose:
             print("🎨 Encoding categorical features...")
     
+        # Reset internal lists
         self.low_cardinality_features_ = []
         self.high_cardinality_features_ = []
     
@@ -893,19 +896,26 @@ class ModelDataProfiler:
         if not cats:
             X = pd.concat(X_parts, axis=1)
             return X, y
-    
-        for c in cats:
-            if df[c].nunique() > self.cardinality_threshold:
-                self.high_cardinality_features_.append(c)
-            else:
-                self.low_cardinality_features_.append(c)
 
-        df_low_card = df[self.low_cardinality_features_].fillna("missing_category")
-        df_low_card = pd.get_dummies(df_low_card, columns=self.low_cardinality_features_, drop_first=True)
+        # If caller requested hashing all categorical features (explicit numeric check),
+        # force all categorical columns to be treated as high-cardinality.
+        if self.force_hash_all:
+            self.high_cardinality_features_ = cats.copy()
+            self.low_cardinality_features_ = []
+        else:
+            for c in cats:
+                if df[c].nunique() > self.cardinality_threshold:
+                    self.high_cardinality_features_.append(c)
+                else:
+                    self.low_cardinality_features_.append(c)
 
+        # Low-cardinality: one-hot
         if self.low_cardinality_features_:
-            X_parts.append(pd.get_dummies(df[self.low_cardinality_features_], drop_first=True).reset_index(drop=True))
+            df_low = df[self.low_cardinality_features_].fillna("missing_category")
+            df_low_ohe = pd.get_dummies(df_low, columns=self.low_cardinality_features_, drop_first=True)
+            X_parts.append(df_low_ohe.reset_index(drop=True))
     
+        # High-cardinality handling
         if self.high_cardinality_features_:
             if self.high_cardinality_strategy == "grouping":
                 if self.verbose:
@@ -924,36 +934,32 @@ class ModelDataProfiler:
                 # --- Safety checks before hashing ---
                 df_high = df[self.high_cardinality_features_].copy()
             
-                # Case 1: No remaining columns after filtering
-                if df_high.shape[1] == 0:
+                # Convert to dict-of-records for FeatureHasher
+                dict_rows = df_high.to_dict(orient="records")
+        
+                # Check if there is at least one non-empty value to hash (tolerant check)
+                any_non_null = any(any((v is not None and (not (isinstance(v, float) and np.isnan(v)))) for v in row.values()) for row in dict_rows)
+                if not any_non_null:
                     if self.verbose:
-                        print("⚠️ No remaining high-cardinality features to hash — skipping hashing step.")
+                        print("⚠️ No valid categorical values to hash — skipping hashing step.")
                 else:
-                    # Convert to dict-of-records for FeatureHasher
-                    dict_rows = df_high.to_dict(orient="records")
-            
-                    # Case 2: Empty dicts (e.g., all missing or dropped)
-                    if not any(any(row.values()) for row in dict_rows):
+                    # Perform the actual hashing
+                    self.hasher_ = FeatureHasher(
+                        n_features=self.n_hashing_features,
+                        input_type="dict"
+                    )
+                    try:
+                        hashed = self.hasher_.fit_transform(dict_rows).toarray()
+                        df_hashed = pd.DataFrame(
+                            hashed,
+                            columns=[f"hash_{i}" for i in range(hashed.shape[1])]
+                        ).reset_index(drop=True)
+                        X_parts.append(df_hashed)
                         if self.verbose:
-                            print("⚠️ No valid categorical values to hash — skipping hashing step.")
-                    else:
-                        # Perform the actual hashing
-                        self.hasher_ = FeatureHasher(
-                            n_features=self.n_hashing_features,
-                            input_type="dict"
-                        )
-                        try:
-                            hashed = self.hasher_.fit_transform(dict_rows).toarray()
-                            df_hashed = pd.DataFrame(
-                                hashed,
-                                columns=[f"hash_{i}" for i in range(hashed.shape[1])]
-                            ).reset_index(drop=True)
-                            X_parts.append(df_hashed)
-                            if self.verbose:
-                                print(f"✅ Successfully hashed into {df_hashed.shape[1]} features.")
-                        except ValueError as e:
-                            if self.verbose:
-                                print(f"⚠️ Skipping hashing due to ValueError: {e}")
+                            print(f"✅ Successfully hashed into {df_hashed.shape[1]} features.")
+                    except ValueError as e:
+                        if self.verbose:
+                            print(f"⚠️ Skipping hashing due to ValueError: {e}")
     
         X = pd.concat(X_parts, axis=1)
         X = X.drop(columns=[self.target] + self.date_features_, errors="ignore")
@@ -961,30 +967,51 @@ class ModelDataProfiler:
         return X, y
 
     def _detect_leakage(self, X, df):
-        """Detect and remove features with potential target leakage."""
+        """Detect features with potential target leakage.
+
+        NOTE: This method now returns the list of suspicious columns and sets self.leakage_flags.
+        It does not mutate the passed `df` nor the `X` in-place; the caller should decide
+        whether/when to drop the returned columns.
+        """
         if self.verbose:
             print("🕵️ Checking for target leakage or proxy variables...")
     
         self.leakage_flags = self.detect_leakage_and_proxies(df, target=self.target, verbose=self.verbose)
         if not self.leakage_flags:
-            return X
+            return []
     
         suspicious_cols = list(self.leakage_flags.keys())
         if self.verbose:
-            print(f"⚠️ Removing {len(suspicious_cols)} leakage features: {suspicious_cols[:5]}{'...' if len(suspicious_cols)>5 else ''}")
-        print(f'shape of X before removing suspicious_cols: {X.shape}')
-        X = X.drop(columns=[c for c in suspicious_cols if c in X.columns], errors="ignore")
-        print(f'shape of X after removing suspicious_cols: {X.shape}')
-        
-        return X
+            print(f"⚠️ Found {len(suspicious_cols)} suspected leakage features: {suspicious_cols[:5]}{'...' if len(suspicious_cols)>5 else ''}")
+        # Do not drop here — return the list for the caller to apply (safer & consistent)
+        return suspicious_cols
 
     def _fit_and_diagnose(self, X, y):
-        """Fit baseline model and run residual diagnostics."""
+        """Fit baseline model and run residual diagnostics.
+
+        This function will:
+        - Fit an initial baseline model (regression or classification).
+        - Run residual diagnostics which may identify features to drop (self.features_to_drop_).
+        - If features_to_drop_ are set, drop them and refit the baseline model to return the cleaned model/predictions.
+        """
         if self.verbose:
             print("🧮 Fitting baseline model and running residual diagnostics...")
     
         self.model_, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
         self.diagnostics_ = self._residual_analysis(X, y, preds, model_type, verbose=self.verbose)
+
+        # If _residual_analysis identified features to drop, apply them and refit
+        if hasattr(self, "features_to_drop_") and self.features_to_drop_:
+            cols_to_drop = [c for c in self.features_to_drop_ if c in X.columns]
+            if cols_to_drop:
+                if self.verbose:
+                    print(f"⚠️ Removing {len(cols_to_drop)} features identified by residual analysis: {cols_to_drop[:5]}{'...' if len(cols_to_drop)>5 else ''}")
+                X_reduced = X.drop(columns=cols_to_drop, errors="ignore")
+                # Refit a final baseline model on the reduced set
+                if self.verbose:
+                    print("🔁 Refitting baseline model after dropping problematic columns...")
+                self.model_, preds, model_type = self._fit_baseline_model(X_reduced, y, verbose=self.verbose)
+                return self.model_, preds, model_type, self.diagnostics_
         
         return self.model_, preds, model_type, self.diagnostics_
 
@@ -1003,22 +1030,18 @@ class ModelDataProfiler:
         print(f"running the _impute_missing_and_flag bit now... df shape at this moment: {df.shape}")
         df = self._impute_missing_and_flag(df)
         print(f"running the _encode_categoricals bit now... df shape at this moment: {df.shape}")
-        # Inside profile(), before encoding:
-        if self.rare_category_threshold == 0.0:
-            self.high_cardinality_features_ = self.categorical_features.copy()
-            self.low_cardinality_features_.clear()
-            if self.verbose:
-                print("⚙️ rare_category_threshold = 0.0 → forcing all categorical features to hashing.")
-                
+        # The force_hash_all flag is already computed in __init__ (explicit numeric check)
+        
         X, y = self._encode_categoricals(df)
         print(f"running the _detect_leakage bit now... df shape at this moment: {df.shape}")
-        X = self._detect_leakage(X, df)
-
-        if hasattr(self, "features_to_drop_") and self.features_to_drop_:
-            X = X.drop(columns=self.features_to_drop_, errors="ignore")
+        suspicious_cols = self._detect_leakage(X, df)
+        if suspicious_cols:
+            X = X.drop(columns=[c for c in suspicious_cols if c in X.columns], errors="ignore")
             if self.verbose:
-                print(f"⚠️ Removed {len(self.features_to_drop_)} correlated/constant features before modeling.")
+                print(f"⚠️ Removed {len(suspicious_cols)} leakage columns prior to modeling.")
 
+        # _fit_and_diagnose will run residual analysis and — if it identifies features_to_drop_ —
+        # will drop them and re-fit the final baseline model before returning.
         print(f"running the _fit_and_diagnose bit now... df shape at this moment: {df.shape}")
         model, preds, model_type, diagnostics = self._fit_and_diagnose(X, y)
     
@@ -1234,24 +1257,12 @@ class ModelDataProfiler:
         return report
 
 
-    
+
     def save_report(self, output_dir: str = "reports", prefix: str = "model_profile", include_text: bool = True):
         """
         Save the profiler's results as both JSON and (optionally) text summaries.
     
-        Parameters
-        ----------
-        output_dir : str, default="reports"
-            Directory where the reports will be saved.
-        prefix : str, default="model_profile"
-            Prefix for the output filename (timestamp will be appended automatically).
-        include_text : bool, default=True
-            Whether to also save a human-readable text summary alongside the JSON.
-    
-        Returns
-        -------
-        dict
-            Dictionary with file paths of the saved reports.
+        Uses a safe JSON serializer that handles pandas Timestamps and numpy types.
         """
         os.makedirs(output_dir, exist_ok=True)
     
@@ -1264,11 +1275,17 @@ class ModelDataProfiler:
     
         # --- Save JSON report ---
         with open(json_path, "w", encoding="utf-8") as f_json:
-            json.dump(report_dict, f_json, indent=2, ensure_ascii=False)
+            json.dump(report_dict, f_json, indent=2, ensure_ascii=False, default=_json_serializer)
     
         # --- Save text summary (optional) ---
         if include_text:
-            summary_text = self.summarize_profile()
+            # summarize_profile prints to stdout; we provide a compact textual summary file
+            summary_lines = []
+            summary_lines.append("ModelDataProfiler Summary")
+            summary_lines.append("========================")
+            if hasattr(self, "diagnostics_") and self.diagnostics_:
+                summary_lines.append(f"Recommendation: {self.diagnostics_.get('recommendation', '')}")
+            summary_text = "\n".join(summary_lines)
             with open(txt_path, "w", encoding="utf-8") as f_txt:
                 f_txt.write(summary_text)
     
