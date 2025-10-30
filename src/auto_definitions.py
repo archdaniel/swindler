@@ -1024,26 +1024,36 @@ class ModelDataProfiler:
         - Fit an initial baseline model (regression or classification).
         - Run residual diagnostics which may identify features to drop (self.features_to_drop_).
         - If features_to_drop_ are set, drop them and refit the baseline model to return the cleaned model/predictions.
+        It will also persist the final X used for modeling as self.X_.
         """
         if self.verbose:
             print("🧮 Fitting baseline model and running residual diagnostics...")
-    
+
+        # initial fit on X
         self.model_, preds, model_type = self._fit_baseline_model(X, y, verbose=self.verbose)
         self.diagnostics_ = self._residual_analysis(X, y, preds, model_type, verbose=self.verbose)
 
+        # Default final_X is the X we used for the initial fit
+        final_X = X.copy()
+
         # If _residual_analysis identified features to drop, apply them and refit
         if hasattr(self, "features_to_drop_") and self.features_to_drop_:
-            cols_to_drop = [c for c in self.features_to_drop_ if c in X.columns]
+            cols_to_drop = [c for c in self.features_to_drop_ if c in final_X.columns]
             if cols_to_drop:
                 if self.verbose:
                     print(f"⚠️ Removing {len(cols_to_drop)} features identified by residual analysis: {cols_to_drop[:5]}{'...' if len(cols_to_drop)>5 else ''}")
-                X_reduced = X.drop(columns=cols_to_drop, errors="ignore")
+                final_X = final_X.drop(columns=cols_to_drop, errors="ignore")
                 # Refit a final baseline model on the reduced set
                 if self.verbose:
                     print("🔁 Refitting baseline model after dropping problematic columns...")
-                self.model_, preds, model_type = self._fit_baseline_model(X_reduced, y, verbose=self.verbose)
+                self.model_, preds, model_type = self._fit_baseline_model(final_X, y, verbose=self.verbose)
+                # persist the refit preds/diagnostics if needed (we keep diagnostics_ from earlier)
+                # update self.X_ with the reduced X used to train final model
+                self.X_ = final_X.copy()
                 return self.model_, preds, model_type, self.diagnostics_
-        
+
+        # persist the X used to train the (final) model
+        self.X_ = final_X.copy()
         return self.model_, preds, model_type, self.diagnostics_
 
     
@@ -1076,6 +1086,30 @@ class ModelDataProfiler:
         print(f"running the _fit_and_diagnose bit now... df shape at this moment: {df.shape}")
         model, preds, model_type, diagnostics = self._fit_and_diagnose(X, y)
     
+        try:
+            # start from original df copy for readability
+            df_transformed = df.copy().reset_index(drop=True)
+
+            # Add hashed or new modeling-only columns that are present in self.X_ but not in df_transformed
+            for col in getattr(self, "X_", pd.DataFrame()).columns:
+                if col not in df_transformed.columns:
+                    df_transformed[col] = self.X_.reset_index(drop=True)[col].values
+
+            # Remove features that were intentionally removed from modeling
+            to_remove = []
+            if hasattr(self, "leakage_flags") and self.leakage_flags:
+                to_remove += list(self.leakage_flags.keys())
+            if hasattr(self, "features_to_drop_") and self.features_to_drop_:
+                to_remove += list(self.features_to_drop_)
+            for c in set(to_remove):
+                if c in df_transformed.columns:
+                    df_transformed.drop(columns=[c], inplace=True, errors="ignore")
+
+            self.df_transformed_ = df_transformed
+        except Exception:
+            # be conservative: fallback to original df if anything goes wrong
+            self.df_transformed_ = df.copy()
+
         # Final report dictionary
         report = {
             "model_type": model_type,

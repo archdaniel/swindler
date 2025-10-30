@@ -240,6 +240,8 @@ class ModelAwarePreprocessor(AutoPreprocessor):
             # CatBoost prefers native categorical names (we'll supply list)
             self.categorical_feature_names_ = self.low_cardinality_features_ + self.high_cardinality_features_
 
+# --- within ModelAwarePreprocessor class ---
+
     def fit(self, X: pd.DataFrame, y=None):
         # run AutoPreprocessor fit first
         super().fit(X, y)
@@ -248,7 +250,11 @@ class ModelAwarePreprocessor(AutoPreprocessor):
             numeric_cols = [c for c in self.initial_numerical_features_ if c not in self.id_features_]
             if numeric_cols:
                 self.scaler_ = StandardScaler()
-                self.scaler_.fit(X[numeric_cols].fillna(0))
+                # store the exact column order used for scaler fitting so we can reproduce it
+                self.scaler_feature_names_ = list(numeric_cols)
+                # Fit the scaler on the DataFrame values in that exact order
+                scaler_input = X.reindex(columns=self.scaler_feature_names_, fill_value=0).fillna(0).values
+                self.scaler_.fit(scaler_input)
         return self
 
     def transform(self, X: pd.DataFrame) -> Union[pd.DataFrame, Tuple[pd.DataFrame, List[str]]]:
@@ -257,14 +263,11 @@ class ModelAwarePreprocessor(AutoPreprocessor):
         pre_trans = super().transform(df)
 
         # If we requested label-encoding for low-cardinality features (tree workflow),
-        # apply label encoding in place of OHE part. Because AutoPreprocessor by default
-        # will have appended OHE for low-card; we need to re-create label-encoded low-card
-        # representation if configured that way. A simpler approach: rebuild label-encoded
-        # representation from original df for those low-card features and then stitch with numeric part.
+        # apply label encoding in place of OHE part...
+        # (unchanged from previous code) ...
         if self.low_card_label_encode_:
-            # get numeric part and missing indicators
+            # ... same label-encoding assembly ...
             numeric_and_missing = pre_trans[self.initial_numerical_features_ + [c for c in pre_trans.columns if c.endswith('_was_missing') and c not in self.initial_numerical_features_]].copy()
-            # label encode low-card features from original df (fit on missing->'missing_category')
             df_low = X[self.low_card_label_encode_].fillna("missing_category").astype(str).copy()
             le_parts = []
             for c in df_low.columns:
@@ -273,11 +276,9 @@ class ModelAwarePreprocessor(AutoPreprocessor):
                     le.fit(df_low[c])
                     encoded = le.transform(df_low[c])
                 except Exception:
-                    # fallback: map categories to pandas factorize
                     encoded = pd.factorize(df_low[c])[0]
                 le_parts.append(pd.Series(encoded, name=c))
             le_df = pd.concat(le_parts, axis=1)
-            # For high-cardinality hashed features, keep the hashed columns appended by AutoPreprocessor (if any)
             hashed_cols = [c for c in pre_trans.columns if c.startswith("hash_")]
             hashed_df = pre_trans[hashed_cols].copy() if hashed_cols else pd.DataFrame(index=pre_trans.index)
             transformed = pd.concat([numeric_and_missing.reset_index(drop=True), le_df.reset_index(drop=True), hashed_df.reset_index(drop=True)], axis=1)
@@ -285,13 +286,15 @@ class ModelAwarePreprocessor(AutoPreprocessor):
             transformed = pre_trans
 
         # apply scaling if configured
-        if self.scale_numeric and self.scaler_:
-            numeric_cols = [c for c in self.initial_numerical_features_ if c in transformed.columns]
-            # Reorder columns to match the order seen by the scaler during fit
-            scaler_input_df = transformed[numeric_cols].fillna(0)
-            ordered_scaler_input = scaler_input_df[self.scaler_.feature_names_in_]
-            if numeric_cols:
-                transformed[self.scaler_.feature_names_in_] = self.scaler_.transform(ordered_scaler_input)
+        if self.scale_numeric and getattr(self, "scaler_", None) is not None and getattr(self, "scaler_feature_names_", None):
+            # Ensure we use exactly the same column names and order as during fit
+            numeric_cols = [c for c in self.scaler_feature_names_ if c in transformed.columns]
+            # Build array in the exact order (missing columns filled with zeros)
+            scaler_input_df = transformed.reindex(columns=self.scaler_feature_names_, fill_value=0).fillna(0)
+            scaler_input = scaler_input_df.values
+            scaled_array = self.scaler_.transform(scaler_input)
+            # Replace the numeric columns in the transformed DataFrame with scaled values
+            transformed.loc[:, self.scaler_feature_names_] = scaled_array
 
         # If CatBoost-style output requested, return categorical feature names for native use
         if self.categorical_feature_names_:
