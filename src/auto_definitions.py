@@ -36,6 +36,8 @@ import scipy.sparse.linalg
 import scipy.sparse
 import warnings
 from collections import defaultdict
+from sklearn.tree import DecisionTreeClassifier
+
 warnings.filterwarnings("ignore")
 seed = 505
 
