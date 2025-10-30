@@ -1,9 +1,3 @@
-# define preprocessing functions -- which should be defined for each type of model to be used. 
-# windowing functions, capping, outlier detection.
-# function to window looking backwards, selecting the dataframe, the date feature, 
-# and list of features to be considered.
-
-#  url=https://github.com/archdaniel/swindler/blob/main/src/preprocessing.py
 # src/preprocessing.py
 import pandas as pd
 import numpy as np
@@ -69,6 +63,8 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                 self.imputation_values_[col] = mode.iloc[0] if not mode.empty else "missing_category"
 
         # split into low/high cardinalities
+        self.low_cardinality_features_ = []
+        self.high_cardinality_features_ = []
         for col in categorical_to_impute:
             if df[col].nunique(dropna=False) > self.cardinality_threshold:
                 self.high_cardinality_features_.append(col)
@@ -142,6 +138,10 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                     parts.append(df_hashed.reset_index(drop=True))
 
         X_transformed = pd.concat(parts, axis=1)
+
+        # ensure unique column names (avoid collisions from OHE / numeric columns)
+        X_transformed.columns = _make_unique(X_transformed.columns.tolist())
+
         if not self.final_features_:
             self.final_features_ = X_transformed.columns.tolist()
         X_transformed = X_transformed.reindex(columns=self.final_features_, fill_value=0)
@@ -181,6 +181,26 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                     self.initial_numerical_features_.remove(col)
 
 
+def _make_unique(cols: List[str]) -> List[str]:
+    """Make list of column names unique by appending suffixes to duplicates (preserving order)."""
+    seen = {}
+    out = []
+    for c in cols:
+        if c not in seen:
+            seen[c] = 0
+            out.append(c)
+        else:
+            seen[c] += 1
+            new_name = f"{c}__dup{seen[c]}"
+            # ensure new_name is also unique
+            while new_name in seen:
+                seen[c] += 1
+                new_name = f"{c}__dup{seen[c]}"
+            seen[new_name] = 0
+            out.append(new_name)
+    return out
+
+
 class ModelAwarePreprocessor(AutoPreprocessor):
     """
     Model-aware wrapper over AutoPreprocessor.
@@ -197,64 +217,78 @@ class ModelAwarePreprocessor(AutoPreprocessor):
         self.scale_numeric: bool = False
         self.low_card_label_encode_: List[str] = []
         self.categorical_feature_names_: List[str] = []  # for CatBoost-like use
+        self._profiler_preference_: Optional[str] = None
+        self.scaler_feature_names_: List[str] = []
 
     def configure_from_profiler(self, profiler_report: Dict[str, Any]):
         """
-        Configure preprocessing behavior using profiler report (output of ModelDataProfiler.profile()).
-        Expects profiler_report to be the 'report' dict returned by ModelDataProfiler.profile().
+        Configure preprocessing preference using profiler report.
+        We DO NOT apply strategy changes that depend on lists (low/high cardinality) here,
+        because those lists are populated during fit. Instead we record the preference and
+        apply it in fit().
         """
-        diag = profiler_report.get("diagnostics", {})
-        rec_type = diag.get("recommendation", None) or profiler_report.get("diagnostics", {}).get("recommendation_type", None)
+        diag = profiler_report.get("diagnostics", {}) or {}
+        # prefer explicit keys in diagnostics
+        rec = diag.get("recommendation_type") or diag.get("recommendation") or ""
+        rt = str(rec).lower() if rec is not None else ""
 
-        # Normalize possible values
-        # If profiler used earlier convention 'Parametric'/'Non-Parametric' in 'recommendation_type',
-        # or used 'recommendation' string, try to interpret.
-        if isinstance(rec_type, str):
-            rt = rec_type.lower()
-        elif rec_type is None:
-            rt = None
+        # detect 'non-param' first (unambiguous)
+        if "non-param" in rt or "non param" in rt or ("non" in rt and "param" in rt):
+            pref = "non-linear"
+        elif "param" in rt or "linear" in rt:
+            pref = "linear"
         else:
-            rt = str(rec_type).lower()
+            # fallback: check top-level profiler model_type field
+            top_model_type = profiler_report.get("model_type", "") or ""
+            pref = "linear" if "param" in str(top_model_type).lower() or "linear" in str(top_model_type).lower() else "non-linear"
 
-        # Default to non-linear if not clear
-        if "parametric" in rt or "linear" in rt:
-            # linear workflow
-            if self.verbose: print("ModelAwarePreprocessor: configuring for LINEAR models (parametric).")
+        self._profiler_preference_ = pref
+        if self.verbose:
+            print(f"ModelAwarePreprocessor: recorded profiler preference -> {self._profiler_preference_} (will apply during fit)")
+
+    def fit(self, X: pd.DataFrame, y=None):
+        # run AutoPreprocessor fit first (this populates low/high card lists)
+        super().fit(X, y)
+
+        # Apply profiler preference now that we have low/high cardinal lists
+        pref = getattr(self, "_profiler_preference_", None)
+        if pref == "linear":
+            if self.verbose: print("Applying LINEAR (parametric) preprocessing configuration.")
             self.high_cardinality_strategy = 'grouping'
-            self.rare_category_threshold = getattr(self, 'rare_category_threshold', 0.01)
+            # keep rare_category_threshold as-is (or default)
             self.scale_numeric = True
-            self.scaler_ = StandardScaler()
-            # keep low-cardinality as OHE (AutoPreprocessor default)
-            self.low_card_label_encode_ = []
+            self.low_card_label_encode_ = []  # prefer OHE for low-card
             self.categorical_feature_names_ = []
         else:
-            # non-linear / tree-based workflow
-            if self.verbose: print("ModelAwarePreprocessor: configuring for TREE-BASED models (non-parametric).")
+            if self.verbose: print("Applying NON-LINEAR (tree) preprocessing configuration.")
             self.high_cardinality_strategy = 'hashing'
-            # force rare threshold to 0 to ensure hashing of many categories if desired
             self.rare_category_threshold = 0.0
             self.n_hashing_features = max(16, getattr(self, 'n_hashing_features', 20))
             self.scale_numeric = False
-            # For low-cardinality prefer label encoding (trees like it)
+            # now that low_cardinality_features_ is set by super().fit, set label encode targets
             self.low_card_label_encode_ = self.low_cardinality_features_.copy()
-            # CatBoost prefers native categorical names (we'll supply list)
             self.categorical_feature_names_ = self.low_cardinality_features_ + self.high_cardinality_features_
 
-# --- within ModelAwarePreprocessor class ---
-
-    def fit(self, X: pd.DataFrame, y=None):
-        # run AutoPreprocessor fit first
-        super().fit(X, y)
-        # if scaling desired, fit scaler on numeric columns
+        # If scaling desired, fit scaler on numeric columns and persist column order (deduplicated)
         if self.scale_numeric:
             numeric_cols = [c for c in self.initial_numerical_features_ if c not in self.id_features_]
-            if numeric_cols:
+            # Deduplicate numeric_cols preserving order
+            seen = set()
+            numeric_cols_unique = []
+            for c in numeric_cols:
+                if c not in seen:
+                    seen.add(c)
+                    numeric_cols_unique.append(c)
+            if numeric_cols_unique:
                 self.scaler_ = StandardScaler()
-                # store the exact column order used for scaler fitting so we can reproduce it
-                self.scaler_feature_names_ = list(numeric_cols)
+                self.scaler_feature_names_ = numeric_cols_unique
                 # Fit the scaler on the DataFrame values in that exact order
                 scaler_input = X.reindex(columns=self.scaler_feature_names_, fill_value=0).fillna(0).values
                 self.scaler_.fit(scaler_input)
+        else:
+            self.scaler_ = None
+            self.scaler_feature_names_ = []
+
         return self
 
     def transform(self, X: pd.DataFrame) -> Union[pd.DataFrame, Tuple[pd.DataFrame, List[str]]]:
@@ -263,12 +297,21 @@ class ModelAwarePreprocessor(AutoPreprocessor):
         pre_trans = super().transform(df)
 
         # If we requested label-encoding for low-cardinality features (tree workflow),
-        # apply label encoding in place of OHE part...
-        # (unchanged from previous code) ...
-        if self.low_card_label_encode_:
-            # ... same label-encoding assembly ...
-            numeric_and_missing = pre_trans[self.initial_numerical_features_ + [c for c in pre_trans.columns if c.endswith('_was_missing') and c not in self.initial_numerical_features_]].copy()
-            df_low = X[self.low_card_label_encode_].fillna("missing_category").astype(str).copy()
+        # apply label encoding in place of OHE part. Because AutoPreprocessor by default
+        # will have appended OHE for low-card; we need to re-create label-encoded low-card
+        # representation if configured that way. A simpler approach: rebuild label-encoded
+        # representation from original df for those low-card features and then stitch with numeric part.
+        if getattr(self, "low_card_label_encode_", None):
+            # numeric_and_missing: collect numeric and missing-indicators from pre_trans
+            numeric_and_missing = []
+            for c in self.initial_numerical_features_:
+                if c in pre_trans.columns:
+                    numeric_and_missing.append(c)
+            numeric_and_missing += [c for c in pre_trans.columns if c.endswith('_was_missing') and c not in numeric_and_missing]
+            numeric_and_missing_df = pre_trans[numeric_and_missing].copy() if numeric_and_missing else pd.DataFrame(index=pre_trans.index)
+
+            # label encode low-card features from original df (fit on missing->'missing_category')
+            df_low = X[self.low_card_label_encode_].fillna("missing_category").astype(str).copy() if self.low_card_label_encode_ else pd.DataFrame(index=pre_trans.index)
             le_parts = []
             for c in df_low.columns:
                 le = LabelEncoder()
@@ -278,23 +321,38 @@ class ModelAwarePreprocessor(AutoPreprocessor):
                 except Exception:
                     encoded = pd.factorize(df_low[c])[0]
                 le_parts.append(pd.Series(encoded, name=c))
-            le_df = pd.concat(le_parts, axis=1)
+            le_df = pd.concat(le_parts, axis=1) if le_parts else pd.DataFrame(index=pre_trans.index)
+
+            # For high-cardinality hashed features, keep the hashed columns appended by AutoPreprocessor (if any)
             hashed_cols = [c for c in pre_trans.columns if c.startswith("hash_")]
             hashed_df = pre_trans[hashed_cols].copy() if hashed_cols else pd.DataFrame(index=pre_trans.index)
-            transformed = pd.concat([numeric_and_missing.reset_index(drop=True), le_df.reset_index(drop=True), hashed_df.reset_index(drop=True)], axis=1)
+
+            transformed = pd.concat([numeric_and_missing_df.reset_index(drop=True), le_df.reset_index(drop=True), hashed_df.reset_index(drop=True)], axis=1)
         else:
             transformed = pre_trans
 
-        # apply scaling if configured
+        # Ensure column names are unique to avoid reindex error (when transform produced duplicates)
+        transformed.columns = _make_unique(list(transformed.columns))
+
+        # apply scaling if configured and scaler was fitted
         if self.scale_numeric and getattr(self, "scaler_", None) is not None and getattr(self, "scaler_feature_names_", None):
             # Ensure we use exactly the same column names and order as during fit
-            numeric_cols = [c for c in self.scaler_feature_names_ if c in transformed.columns]
+            # If transformed has duplicates or missing numeric columns, reindexing will be safe because we made names unique
+            scaler_cols = [c for c in self.scaler_feature_names_]
             # Build array in the exact order (missing columns filled with zeros)
-            scaler_input_df = transformed.reindex(columns=self.scaler_feature_names_, fill_value=0).fillna(0)
+            scaler_input_df = transformed.reindex(columns=scaler_cols, fill_value=0).fillna(0)
+            # If duplicates remain for some reason, take the first occurrence per column name
+            if scaler_input_df.columns.duplicated().any():
+                scaler_input_df = scaler_input_df.loc[:, ~scaler_input_df.columns.duplicated()]
             scaler_input = scaler_input_df.values
-            scaled_array = self.scaler_.transform(scaler_input)
-            # Replace the numeric columns in the transformed DataFrame with scaled values
-            transformed.loc[:, self.scaler_feature_names_] = scaled_array
+            try:
+                scaled_array = self.scaler_.transform(scaler_input)
+                # Replace the numeric columns in the transformed DataFrame with scaled values
+                transformed.loc[:, scaler_cols] = scaled_array
+            except Exception as e:
+                # fallback: skip scaling and warn
+                if self.verbose:
+                    print(f"⚠️ Scaling failed during transform: {e}. Proceeding without scaling.")
 
         # If CatBoost-style output requested, return categorical feature names for native use
         if self.categorical_feature_names_:
