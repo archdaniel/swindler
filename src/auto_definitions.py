@@ -35,6 +35,7 @@ from sklearn.feature_extraction import FeatureHasher
 import scipy.sparse.linalg
 import scipy.sparse
 import warnings
+from collections import defaultdict
 warnings.filterwarnings("ignore")
 seed = 505
 
