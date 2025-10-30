@@ -287,8 +287,11 @@ class ModelAwarePreprocessor(AutoPreprocessor):
         # apply scaling if configured
         if self.scale_numeric and self.scaler_:
             numeric_cols = [c for c in self.initial_numerical_features_ if c in transformed.columns]
+            # Reorder columns to match the order seen by the scaler during fit
+            scaler_input_df = transformed[numeric_cols].fillna(0)
+            ordered_scaler_input = scaler_input_df[self.scaler_.feature_names_in_]
             if numeric_cols:
-                transformed[numeric_cols] = self.scaler_.transform(transformed[numeric_cols].fillna(0))
+                transformed[self.scaler_.feature_names_in_] = self.scaler_.transform(ordered_scaler_input)
 
         # If CatBoost-style output requested, return categorical feature names for native use
         if self.categorical_feature_names_:
