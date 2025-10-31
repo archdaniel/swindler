@@ -99,7 +99,7 @@ def run_pipeline(
 
     # Optionally drop profiler-detected leakage columns from the workset before fitting preprocessor
     if auto_drop_leakage and getattr(profiler, "leakage_flags", None):
-        leakage_cols = list(profiler.leakage_flags.keys())
+        leakage_cols = [c for c in profiler.leakage_flags.keys() if c != target]
         # remove those columns from work_df (and from profile_df representation)
         work_df = work_df.drop(columns=[c for c in leakage_cols if c in work_df.columns], errors='ignore')
         if verbose:
@@ -162,7 +162,7 @@ def run_pipeline(
             metrics['rmse'] = float(np.sqrt(mean_squared_error(holdout_df[target], y_pred)))
         return metrics
 
-    holdout_metrics = _compute_holdout_metrics(_infer_task_type(work_df[target]), best_model, X_hold, holdout_df[target].values)
+    holdout_metrics = _compute_holdout_metrics(_infer_task_type(work_df[target]), best_model, X_work if 'X_hold' not in locals() else X_hold, holdout_df[target].values)
 
     # unique id columns and values in holdout for downstream exclusion
     unique_id_columns = {

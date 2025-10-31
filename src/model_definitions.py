@@ -118,77 +118,201 @@ class ModelTrainer:
         if self.verbose: print(f"Defining candidate models for task: {self.task_type}, type: {self.model_type}")
         if self.task_type == 'classification':
             self.scoring = 'roc_auc'
-            models = {
-                'LogisticRegression': (LogisticRegression(random_state=self.random_state, max_iter=1000, solver='liblinear'), {
-                    # when hp unavailable, use simple grid
-                    'C': [0.01, 0.1, 1.0],
-                    'penalty': ['l2']
-                })
-            }
-            if self.model_type == 'non-linear':
-                models['RandomForestClassifier'] = (RandomForestClassifier(random_state=self.random_state), {
-                    'n_estimators': [100],
-                    'max_depth': [10, None]
-                })
-                if xgb:
-                    models['XGBClassifier'] = (xgb.XGBClassifier(random_state=self.random_state, use_label_encoder=False, eval_metric='logloss'), {
-                        'n_estimators': [100],
-                        'learning_rate': [0.1],
-                        'max_depth': [3,5]
+            # define richer candidates (use hyperopt if available)
+            if hp is not None:
+                models = {
+                    'LogisticRegression': (LogisticRegression(random_state=self.random_state, max_iter=1000, solver='liblinear'), {
+                        'C': hp.loguniform('C', np.log(0.01), np.log(100)),
+                        'penalty': hp.choice('penalty', ['l1', 'l2'])
                     })
-                if lgb:
-                    models['LGBMClassifier'] = (lgb.LGBMClassifier(random_state=self.random_state), {
-                        'n_estimators': [100]
+                }
+                if self.model_type == 'non-linear':
+                    models['RandomForestClassifier'] = (RandomForestClassifier(random_state=self.random_state), {
+                        'n_estimators': hp.choice('n_estimators', [100, 200, 300]),
+                        'max_depth': hp.choice('max_depth', [10, 20, 30, None])
                     })
-                if cb:
-                    models['CatBoostClassifier'] = (cb.CatBoostClassifier(random_state=self.random_state, verbose=0), {
-                        'iterations': [100],
-                        'learning_rate': [0.1]
+                    if xgb:
+                        models['XGBClassifier'] = (xgb.XGBClassifier(random_state=self.random_state, use_label_encoder=False, eval_metric='logloss'), {
+                            'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                            'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                            'max_depth': hp.choice('max_depth', [3, 5, 7])
+                        })
+                    if lgb:
+                        models['LGBMClassifier'] = (lgb.LGBMClassifier(random_state=self.random_state), {
+                            'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                            'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                            'num_leaves': hp.choice('num_leaves', [20, 31, 40, 50])
+                        })
+                    if cb:
+                        models['CatBoostClassifier'] = (cb.CatBoostClassifier(random_state=self.random_state, verbose=0), {
+                            'iterations': hp.choice('iterations', [100, 200, 500]),
+                            'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                            'depth': hp.choice('depth', [4, 6, 8])
+                        })
+            else:
+                # fallback to safe grids (no hyperopt dependency)
+                models = {
+                    'LogisticRegression': (LogisticRegression(random_state=self.random_state, max_iter=1000, solver='liblinear'), {
+                        'C': [0.01, 0.1, 1.0],
+                        'penalty': ['l2']
                     })
+                }
+                if self.model_type == 'non-linear':
+                    models['RandomForestClassifier'] = (RandomForestClassifier(random_state=self.random_state), {
+                        'n_estimators': [100, 200],
+                        'max_depth': [10, None]
+                    })
+                    if xgb:
+                        models['XGBClassifier'] = (xgb.XGBClassifier(random_state=self.random_state, use_label_encoder=False, eval_metric='logloss'), {
+                            'n_estimators': [100, 200],
+                            'learning_rate': [0.05, 0.1],
+                            'max_depth': [3, 5]
+                        })
+                    if lgb:
+                        models['LGBMClassifier'] = (lgb.LGBMClassifier(random_state=self.random_state), {
+                            'n_estimators': [100, 200],
+                            'learning_rate': [0.05, 0.1]
+                        })
+                    if cb:
+                        models['CatBoostClassifier'] = (cb.CatBoostClassifier(random_state=self.random_state, verbose=0), {
+                            'iterations': [100, 200],
+                            'learning_rate': [0.05, 0.1]
+                        })
         else:
             self.scoring = 'r2'
-            models = {
-                'Ridge': (Ridge(random_state=self.random_state), {
-                    'alpha': [1.0]
-                })
-            }
-            if self.model_type == 'non-linear':
-                models['RandomForestRegressor'] = (RandomForestRegressor(random_state=self.random_state), {
-                    'n_estimators': [100],
-                    'max_depth': [10, None]
-                })
+            if hp is not None:
+                models = {
+                    'Ridge': (Ridge(random_state=self.random_state), {
+                        'alpha': hp.loguniform('alpha', np.log(0.1), np.log(10.0))
+                    })
+                }
+                if self.model_type == 'non-linear':
+                    models['RandomForestRegressor'] = (RandomForestRegressor(random_state=self.random_state), {
+                        'n_estimators': hp.choice('n_estimators', [100, 200, 300]),
+                        'max_depth': hp.choice('max_depth', [10, 20, 30, None])
+                    })
+                    if xgb:
+                        models['XGBRegressor'] = (xgb.XGBRegressor(random_state=self.random_state), {
+                            'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                            'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                            'max_depth': hp.choice('max_depth', [3, 5, 7])
+                        })
+                    if lgb:
+                        models['LGBMRegressor'] = (lgb.LGBMRegressor(random_state=self.random_state), {
+                            'n_estimators': hp.choice('n_estimators', [100, 200, 500]),
+                            'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                            'num_leaves': hp.choice('num_leaves', [20, 31, 40, 50])
+                        })
+                    if cb:
+                        models['CatBoostRegressor'] = (cb.CatBoostRegressor(random_state=self.random_state, verbose=0), {
+                            'iterations': hp.choice('iterations', [100, 200, 500]),
+                            'learning_rate': hp.uniform('learning_rate', 0.01, 0.2),
+                            'depth': hp.choice('depth', [4, 6, 8])
+                        })
+            else:
+                models = {
+                    'Ridge': (Ridge(random_state=self.random_state), {
+                        'alpha': [1.0]
+                    })
+                }
+                if self.model_type == 'non-linear':
+                    models['RandomForestRegressor'] = (RandomForestRegressor(random_state=self.random_state), {
+                        'n_estimators': [100],
+                        'max_depth': [10, None]
+                    })
         self.models_ = models
 
     def _train_and_tune(self):
         """Trains and tunes all candidate models."""
-        # train_test_split works with pandas DataFrame and scipy.sparse
+        # train/val/test split to support early stopping
         if sp.issparse(self.X) or isinstance(self.X, np.ndarray):
-            X_train, X_test, y_train, y_test = train_test_split(
+            X_trainval, X_test, y_trainval, y_test = train_test_split(
                 self.X, self.y, test_size=self.test_size, random_state=self.random_state,
                 stratify=(self.y if self.task_type == 'classification' and len(np.unique(self.y))>1 else None)
             )
         else:
-            X_train, X_test, y_train, y_test = train_test_split(
+            X_trainval, X_test, y_trainval, y_test = train_test_split(
                 self.X, self.y, test_size=self.test_size, random_state=self.random_state,
                 stratify=(self.y if self.task_type == 'classification' and len(np.unique(self.y))>1 else None)
             )
+
+        # carve out a small validation set for early stopping
+        try:
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_trainval, y_trainval, test_size=0.1, random_state=self.random_state,
+                stratify=(y_trainval if self.task_type == 'classification' and len(np.unique(y_trainval))>1 else None)
+            )
+        except Exception:
+            X_train, X_val, y_train, y_val = X_trainval, None, y_trainval, None
 
         results = []
         for name, (model, params) in self.models_.items():
             if self.verbose: print(f"--- Training {name} ---")
             best_estimator = None
             best_params = {}
-            # Simple grid/random CV handling (do not rely on hyperopt dependency here)
-            if params:
-                search_cv = GridSearchCV(model, params, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1)
-                search_cv.fit(X_train, y_train)
-                best_estimator = search_cv.best_estimator_
-                best_params = search_cv.best_params_
-            else:
-                best_estimator = model.fit(X_train, y_train)
 
-            # Evaluate
-            y_pred = best_estimator.predict(X_test)
+            # prepare model-specific fit params for early stopping
+            fit_params = {}
+            supports_early = False
+            if name.startswith("XGB") and xgb and X_val is not None:
+                supports_early = True
+                fit_params = {'eval_set': [(X_val, y_val)], 'early_stopping_rounds': 10, 'verbose': False}
+            elif name.startswith("LGBM") and lgb and X_val is not None:
+                supports_early = True
+                fit_params = {'eval_set': [(X_val, y_val)], 'early_stopping_rounds': 10, 'verbose': False}
+            elif name.startswith("CatBoost") and cb and X_val is not None:
+                supports_early = True
+                fit_params = {'eval_set': (X_val, y_val), 'early_stopping_rounds': 10, 'verbose': False}
+
+            # If using hyperopt space, run hyperopt (slow) otherwise GridSearchCV
+            if params and hp is not None and any(hasattr(v, 'name') for v in getattr(params, 'values', lambda: {})()):
+                # hyperopt flow (keeps previous design)
+                def objective(hyperparams):
+                    if 'iterations' in hyperparams:
+                        hyperparams['iterations'] = int(hyperparams['iterations'])
+                    clf = model.set_params(**hyperparams)
+                    try:
+                        score = cross_val_score(clf, X_train, y_train, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1).mean()
+                    except Exception:
+                        score = 0.0
+                    return {'loss': -score, 'status': STATUS_OK}
+                trials = Trials()
+                best_h = fmin(fn=objective, space=params, algo=tpe.suggest, max_evals=10, trials=trials, rstate=np.random.default_rng(self.random_state))
+                best_params = space_eval(params, best_h)
+                if 'iterations' in best_params:
+                    best_params['iterations'] = int(best_params['iterations'])
+                best_estimator = model.set_params(**best_params).fit(X_train, y_train, **(fit_params if supports_early else {}))
+            elif params:
+                # fallback to GridSearchCV. If early stopping is available, pass fit_params with eval_set to GridSearchCV.fit
+                try:
+                    search_cv = GridSearchCV(model, params, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1)
+                    if supports_early and X_val is not None:
+                        search_cv.fit(X_train, y_train, **fit_params)
+                    else:
+                        search_cv.fit(X_train, y_train)
+                    best_estimator = search_cv.best_estimator_
+                    best_params = search_cv.best_params_
+                except Exception as e:
+                    # fallback: plain fit
+                    if self.verbose:
+                        print(f"GridSearchCV failed for {name} with {e}. Falling back to direct fit.")
+                    best_estimator = model.fit(X_train, y_train)
+            else:
+                # no hyperparams to tune
+                try:
+                    if supports_early and X_val is not None:
+                        best_estimator = model.fit(X_train, y_train, **fit_params)
+                    else:
+                        best_estimator = model.fit(X_train, y_train)
+                except Exception:
+                    best_estimator = model.fit(X_train, y_train)
+
+            # evaluate on test set
+            try:
+                y_pred = best_estimator.predict(X_test)
+            except Exception:
+                y_pred = best_estimator.predict(X_test)  # let exception surface if it fails
+
             model_results = {'model': name, 'best_params': best_params}
             metrics_to_log = {}
             if self.task_type == 'classification':
