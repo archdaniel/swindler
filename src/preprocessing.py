@@ -374,6 +374,21 @@ class ModelAwarePreprocessor(AutoPreprocessor):
         # create imputations and indicators, etc. (parent transform handles basic encodings for OHE/hashing)
         pre_trans = super().transform(df)
 
+        if isinstance(pre_trans, tuple):
+            # pre_trans expected forms:
+            # - (X_sparse, feature_names)  where X_sparse is scipy.sparse CSR and feature_names is list[str]
+            # - or (X_sparse, dense_feature_names, hashed_feature_names) if you extended AutoPreprocessor
+            # For now, keep behavior simple:
+            #  - If user requested low-cardinality label encoding for tree workflows, we *prefer* label-encoding,
+            #    however constructing label-encoded + sparse hashed assembly may be memory-heavy. We therefore
+            #    fallback to the sparse output produced by AutoPreprocessor (which used OHE for low-card features).
+            if self.low_card_label_encode_:
+                if self.verbose:
+                    print("⚠️ low-cardinality label-encoding requested but preprocessor returned sparse output. "
+                          "Falling back to sparse/OHE output (skipping label-encoding to avoid excessive memory use).")
+            # Return the sparse tuple unchanged (caller code expects a tuple when output_sparse is True)
+            return pre_trans
+        
         # If we requested label-encoding for low-cardinality features (tree workflow),
         # apply label encoding in place of OHE part. Because AutoPreprocessor by default
         # will have appended OHE for low-card; we need to re-create label-encoded low-card
