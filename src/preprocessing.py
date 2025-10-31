@@ -6,24 +6,27 @@ from typing import List, Tuple, Dict, Any, Union, Optional
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction import FeatureHasher
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from scipy import sparse as sp
 
 class AutoPreprocessor(BaseEstimator, TransformerMixin):
     """
     A preprocessor that automates feature detection, cleaning, imputation,
-    and encoding. This is mostly backwards-compatible with the file you had,
-    but exposes hooks so a model-aware wrapper can configure behaviour.
+    and encoding. Supports returning a sparse transform (hashed part as sparse)
+    to save memory for very high-cardinality features.
     """
     def __init__(self, id_threshold: float = 0.95,
                  cardinality_threshold: int = 50,
                  high_cardinality_strategy: str = 'grouping',
                  n_hashing_features: int = 20,
                  rare_category_threshold: float = 0.01,
+                 output_sparse: bool = False,
                  verbose: bool = True):
         self.id_threshold = id_threshold
         self.cardinality_threshold = cardinality_threshold
         self.high_cardinality_strategy = high_cardinality_strategy
         self.n_hashing_features = n_hashing_features
         self.rare_category_threshold = rare_category_threshold
+        self.output_sparse = output_sparse
         self.verbose = verbose
 
         self.initial_numerical_features_: List[str] = []
@@ -80,7 +83,7 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
         elif self.high_cardinality_strategy == 'hashing':
             if self.high_cardinality_features_:
                 self.hasher_ = FeatureHasher(n_features=self.n_hashing_features, input_type='dict')
-            # for hashing, we will one-hot/label-encode low-cardinals if needed
+            # for hashing, we will encode low-cardinals separately
             self.categorical_to_encode_ = self.low_cardinality_features_
         else:
             raise ValueError(f"Unknown high_cardinality_strategy: {self.high_cardinality_strategy}")
@@ -92,7 +95,15 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
             print("--- AutoPreprocessor fit complete ---")
         return self
 
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+    def transform(self, X: pd.DataFrame) -> Union[pd.DataFrame, Tuple[Union[pd.DataFrame, sp.spmatrix], List[str]]]:
+        """
+        Returns:
+         - If output_sparse False: pandas DataFrame with transformed features.
+         - If output_sparse True: scipy.sparse.csr_matrix (full transform) and list of feature names for dense portion
+           Note: when sparse output is requested we return (X_sparse, feature_names_dense) where
+           feature_names_dense describes the dense column names in order (if any). The hashed columns will still be present
+           but feature names for hashed columns are generic "hash_0..".
+        """
         if self.verbose: print("--- Starting AutoPreprocessor transform ---")
         df = X.copy()
         # drop id/date features
@@ -107,47 +118,114 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                 indicator_col = f"{col}_was_missing"
                 df[indicator_col] = missing_mask.astype(int)
 
-        parts = []
+        parts_dense = []
+        dense_feature_names: List[str] = []
+
+        # Part A: numeric + missing indicators (dense)
         numeric_cols = [c for c in self.initial_numerical_features_ if c in df.columns]
         missing_indicators = [c for c in df.columns if c.endswith('_was_missing')]
-        parts.append(df[numeric_cols + missing_indicators].reset_index(drop=True))
+        dense_part_cols = numeric_cols + missing_indicators
+        if dense_part_cols:
+            parts_dense.append(df[dense_part_cols].reset_index(drop=True))
+            dense_feature_names.extend(dense_part_cols)
 
-        # low-cardinality: one-hot
+        # Part B: low-cardinality one-hot (dense)
         if self.low_cardinality_features_:
             low = [c for c in self.low_cardinality_features_ if c in df.columns]
             if low:
                 df_low = df[low].fillna("missing_category")
                 df_low_ohe = pd.get_dummies(df_low, columns=low, drop_first=True)
-                parts.append(df_low_ohe.reset_index(drop=True))
+                parts_dense.append(df_low_ohe.reset_index(drop=True))
+                dense_feature_names.extend(df_low_ohe.columns.tolist())
 
-        # high-cardinality
+        # Build dense block (if any)
+        if parts_dense:
+            dense_df = pd.concat(parts_dense, axis=1)
+            # ensure deterministic column ordering
+            dense_df.columns = _make_unique(list(dense_df.columns))
+            dense_df = dense_df.astype(np.float32, errors='ignore')
+        else:
+            dense_df = pd.DataFrame(index=df.index)
+
+        # Part C: high-cardinality handling (hashed -> sparse) or grouped -> dense
+        sparse_hashed = None
+        hashed_feature_names = []
         if self.high_cardinality_features_:
             high = [c for c in self.high_cardinality_features_ if c in df.columns]
             if high:
-                df_high = df[high].copy()
                 if self.high_cardinality_strategy == 'grouping':
+                    df_high = df[high].copy()
                     for col in high:
                         frequent = self.frequent_categories_.get(col, [])
                         df_high[col] = df_high[col].where(df_high[col].isin(frequent), 'rare_category')
-                    df_high_ohe = pd.get_dummies(df_high, columns=high, drop_first=True)
-                    parts.append(df_high_ohe.reset_index(drop=True))
-                elif self.high_cardinality_strategy == 'hashing' and self.hasher_:
-                    dict_rows = df_high.fillna("").to_dict(orient='records')
-                    hashed = self.hasher_.transform(dict_rows).toarray()
-                    df_hashed = pd.DataFrame(hashed, columns=[f"hash_{i}" for i in range(hashed.shape[1])])
-                    parts.append(df_hashed.reset_index(drop=True))
+                    df_high_ohe = pd.get_dummies(df_high, columns=high, drop_first=True).reset_index(drop=True)
+                    df_high_ohe.columns = _make_unique(list(df_high_ohe.columns))
+                    # append dense
+                    if not dense_df.empty:
+                        dense_df = pd.concat([dense_df.reset_index(drop=True), df_high_ohe.reset_index(drop=True)], axis=1)
+                    else:
+                        dense_df = df_high_ohe
+                    dense_df = dense_df.astype(np.float32, errors='ignore')
+                    dense_feature_names = list(dense_df.columns)
+                elif self.high_cardinality_strategy == 'hashing':
+                    # HashingEncoder/FeatureHasher works on dict-of-records and can return sparse matrix
+                    df_high = df[high].copy().fillna("").astype(str)
+                    dict_rows = df_high.to_dict(orient='records')
+                    if self.hasher_ is None:
+                        self.hasher_ = FeatureHasher(n_features=self.n_hashing_features, input_type='dict')
+                    hashed_sparse = self.hasher_.transform(dict_rows)  # scipy.sparse matrix
+                    # ensure csr
+                    sparse_hashed = sp.csr_matrix(hashed_sparse, dtype=np.float32)
+                    hashed_feature_names = [f"hash_{i}" for i in range(sparse_hashed.shape[1])]
 
-        X_transformed = pd.concat(parts, axis=1)
+        # If output_sparse requested, convert dense to sparse and hstack
+        if self.output_sparse:
+            # Convert dense_df to sparse (CSR)
+            if not dense_df.empty:
+                dense_sparse = sp.csr_matrix(dense_df.fillna(0).values.astype(np.float32))
+            else:
+                dense_sparse = None
 
-        # ensure unique column names (avoid collisions from OHE / numeric columns)
-        X_transformed.columns = _make_unique(X_transformed.columns.tolist())
+            if sparse_hashed is not None and dense_sparse is not None:
+                X_sparse = sp.hstack([dense_sparse, sparse_hashed], format='csr')
+                # feature names: dense_feature_names + hashed_feature_names
+                feature_names = dense_feature_names + hashed_feature_names
+            elif sparse_hashed is not None:
+                X_sparse = sparse_hashed
+                feature_names = hashed_feature_names
+            elif dense_sparse is not None:
+                X_sparse = dense_sparse
+                feature_names = dense_feature_names
+            else:
+                # empty dataset
+                X_sparse = sp.csr_matrix((len(df), 0), dtype=np.float32)
+                feature_names = []
 
+            if self.verbose:
+                print(f"--- Transform complete. Sparse shape: {X_sparse.shape} (dense_cols={len(dense_feature_names)}, hashed_cols={len(hashed_feature_names)}) ---")
+            return X_sparse, feature_names
+
+        # else return dense DataFrame (merge dense and hashed if grouping produced dense)
+        if not dense_df.empty:
+            X_out = dense_df.reset_index(drop=True)
+        else:
+            X_out = pd.DataFrame(index=df.index)
+        # if hashed part present as sparse but output_sparse False we convert hashed sparse to dense (may be big)
+        if sparse_hashed is not None:
+            hashed_dense = pd.DataFrame(sparse_hashed.toarray(), columns=hashed_feature_names).reset_index(drop=True)
+            X_out = pd.concat([X_out.reset_index(drop=True), hashed_dense.reset_index(drop=True)], axis=1)
+        # ensure final features deterministic and store
+        X_out.columns = _make_unique(list(X_out.columns))
         if not self.final_features_:
-            self.final_features_ = X_transformed.columns.tolist()
-        X_transformed = X_transformed.reindex(columns=self.final_features_, fill_value=0)
-
-        if self.verbose: print(f"--- Transform complete. Final shape: {X_transformed.shape} ---")
-        return X_transformed
+            self.final_features_ = X_out.columns.tolist()
+        X_out = X_out.reindex(columns=self.final_features_, fill_value=0)
+        # downcast numeric to float32
+        numeric_cols = X_out.select_dtypes(include=[np.number]).columns.tolist()
+        if numeric_cols:
+            X_out[numeric_cols] = X_out[numeric_cols].astype(np.float32)
+        if self.verbose:
+            print(f"--- Transform complete. Final shape: {X_out.shape} ---")
+        return X_out
 
     def _detect_feature_types(self, df: pd.DataFrame):
         # numeric-like strings
