@@ -446,28 +446,26 @@ class ModelDataProfiler:
         """
         flags = defaultdict(list)
         y = df[target].copy()
-        # If y not numeric (e.g. strings) factorize to 0/1...
+        # Factorize / numericize target for use in numeric computations & classifier training
         if y.dtype == 'O' or not pd.api.types.is_numeric_dtype(y):
             y_num = pd.factorize(y)[0]
         else:
             y_num = y.values
-    
+
         # Build feature lists if not provided
         if numerical_features is None:
             numerical_features = df.select_dtypes(include=[np.number]).columns.tolist()
             numerical_features = [c for c in numerical_features if c != target]
         if categorical_features is None:
             categorical_features = df.select_dtypes(exclude=[np.number]).columns.tolist()
-    
+
         # ---- 1) Categorical: per-category purity check ----
         for col in categorical_features:
             ser = df[col].astype("object")
             nonnull = ser.dropna()
             if len(nonnull) == 0:
                 continue
-            # frequency per category and positive rate
             grp = df.groupby(col)[target].agg(['count','mean']).rename(columns={'count':'n','mean':'pos_rate'})
-            # consider only categories with min_count
             grp = grp[grp['n'] >= min_count]
             if grp.empty:
                 continue
@@ -482,25 +480,23 @@ class ModelDataProfiler:
                     'count_in_cat': int(max_n),
                     'message': f"Category '{col}=={max_cat}' has purity {max_purity:.3f} (n={max_n})"
                 })
-            # also record high mutual information
+            # mutual information (categorical -> numeric target)
             try:
                 mi = mutual_info_classif(ser.fillna("##NA##").astype(str).values.reshape(-1,1), y_num, discrete_features=True)
-                if mi[0] > 0.1:  # tunable
+                if mi[0] > 0.1:
                     flags[col].append({'type':'mutual_info','mi':float(mi[0])})
             except Exception:
                 pass
-    
+
         # ---- 2) Numerical: check deterministic mapping / point-biserial correlation ----
         for col in numerical_features:
             ser = df[col]
             nonnull = ser.dropna()
             if len(nonnull) == 0:
                 continue
-            # unique value -> single-class ratio
             value_counts = df.groupby(col)[target].agg(['count','mean']).rename(columns={'count':'n','mean':'pos_rate'})
             special = value_counts[value_counts['n'] >= min_count]
             if not special.empty:
-                # any value with purity >= threshold?
                 mv = special['pos_rate'].max()
                 if mv >= purity_threshold:
                     val = special['pos_rate'].idxmax()
@@ -510,60 +506,56 @@ class ModelDataProfiler:
                         'purity': float(mv),
                         'message': f"value {val} in {col} has purity {mv:.3f}"
                     })
-            # point-biserial (numerical vs binary target)
+            # skip point-biserial conversion if not binary target
             try:
-                if len(np.unique(y_num))==2:
+                unique_y = np.unique(y_num)
+                if len(unique_y) == 2:
+                    from scipy.stats import pointbiserialr
                     r, p = pointbiserialr(ser.fillna(ser.mean()), y_num)
                     if abs(r) > 0.9:
                         flags[col].append({'type':'point_biserial','r':float(r),'p':float(p)})
             except Exception:
                 pass
-    
+
         # ---- 3) Single-feature predictive power (fast stumps/logistic) ----
-        # Check categorical via decision stump (depth=1), numeric via simple logistic
+        # Use y_num (factorized) as the training label to avoid dtype conversion issues
         for col in (categorical_features + numerical_features):
             Xcol = df[[col]].copy()
-            # skip all-null
             if Xcol[col].dropna().empty:
                 continue
-            # convert categorical to codes for tree
             is_cat = col in categorical_features
             if is_cat:
                 X_test = Xcol.fillna("##NA##").astype(str)
-                clf = DecisionTreeClassifier(max_depth=1)  # stump
+                clf = DecisionTreeClassifier(max_depth=1)
             else:
                 X_test = Xcol.fillna(Xcol.mean())
                 clf = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=200)
-    
+
             try:
-                clf.fit(X_test, y)
-                acc = accuracy_score(y, clf.predict(X_test))
+                # fit against numericized target
+                clf.fit(X_test, y_num)
+                pred = clf.predict(X_test)
+                acc = accuracy_score(y_num, pred)
                 if acc >= accuracy_threshold:
                     flags[col].append({'type':'single_feature_acc','acc':float(acc),
-                                       'message':f"Single-feature classifier on '{col}' has accuracy {acc:.4f}"})
+                                    'message':f"Single-feature classifier on '{col}' has accuracy {acc:.4f}"})
             except Exception:
                 continue
-    
+
         # ---- 4) Hash-bucket inspection (if user provides hashed matrix) ----
-        # If hashed features are named like 'hash_0', 'hash_1', ... they will be
-        # included among numerical_features. We already tested numeric predictive power above,
-        # but it's useful to explicitly label them:
         for col in numerical_features:
             if isinstance(col, str) and col.startswith("hash"):
-                # if flagged above, annotate reason
                 if col in flags:
                     for s in flags[col]:
                         s['note'] = "hash_bucket"
+
         # ---- 5) Name-based heuristics ----
         suspicious_tokens = ['status','outcome','label','final','result','loan_status','decision','paid','closed']
         for col in df.columns:
             low = col.lower()
             if any(tok in low for tok in suspicious_tokens):
                 flags[col].append({'type':'name_warning','message':f"Column name contains suspicious token: {col}"})
-    
-        # return as regular dict
-        # convert lists to easier-to-inspect format
-        
+
         return {k:list(v) for k,v in flags.items()}
         
     def _fit_baseline_model(self, X, y, verbose: bool = True):

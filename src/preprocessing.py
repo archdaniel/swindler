@@ -19,7 +19,7 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                  high_cardinality_strategy: str = 'grouping',
                  n_hashing_features: int = 20,
                  rare_category_threshold: float = 0.01,
-                 output_sparse: bool = False,
+                 output_sparse: bool = True,
                  verbose: bool = True):
         self.id_threshold = id_threshold
         self.cardinality_threshold = cardinality_threshold
@@ -98,11 +98,10 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
     def transform(self, X: pd.DataFrame) -> Union[pd.DataFrame, Tuple[Union[pd.DataFrame, sp.spmatrix], List[str]]]:
         """
         Returns:
-         - If output_sparse False: pandas DataFrame with transformed features.
-         - If output_sparse True: scipy.sparse.csr_matrix (full transform) and list of feature names for dense portion
-           Note: when sparse output is requested we return (X_sparse, feature_names_dense) where
-           feature_names_dense describes the dense column names in order (if any). The hashed columns will still be present
-           but feature names for hashed columns are generic "hash_0..".
+         - If output_sparse True: (csr_matrix, feature_names) where feature_names corresponds to columns in the matrix.
+         - If output_sparse False: pandas DataFrame (dense).
+        The transform will always respect self.final_features_ if it's already been set during a prior transform,
+        ensuring transforms on different splits produce matrices with identical column ordering and width.
         """
         if self.verbose: print("--- Starting AutoPreprocessor transform ---")
         df = X.copy()
@@ -114,6 +113,9 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
             if col in df.columns:
                 missing_mask = df[col].isnull()
                 if missing_mask.any():
+                    # convert categorical to object before fill to avoid Categorical assignment errors
+                    if pd.api.types.is_categorical_dtype(df[col]):
+                        df[col] = df[col].astype(object)
                     df[col].fillna(val, inplace=True)
                 indicator_col = f"{col}_was_missing"
                 df[indicator_col] = missing_mask.astype(int)
@@ -133,7 +135,12 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
         if self.low_cardinality_features_:
             low = [c for c in self.low_cardinality_features_ if c in df.columns]
             if low:
-                df_low = df[low].fillna("missing_category")
+                # ensure categorical columns converted to object before fillna to avoid categorical setitem errors
+                df_low = df[low].copy()
+                for c in df_low.columns:
+                    if pd.api.types.is_categorical_dtype(df_low[c]):
+                        df_low[c] = df_low[c].astype(object)
+                df_low = df_low.fillna("missing_category")
                 df_low_ohe = pd.get_dummies(df_low, columns=low, drop_first=True)
                 parts_dense.append(df_low_ohe.reset_index(drop=True))
                 dense_feature_names.extend(df_low_ohe.columns.tolist())
@@ -143,7 +150,11 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
             dense_df = pd.concat(parts_dense, axis=1)
             # ensure deterministic column ordering
             dense_df.columns = _make_unique(list(dense_df.columns))
-            dense_df = dense_df.astype(np.float32, errors='ignore')
+            # downcast where possible to float32
+            try:
+                dense_df = dense_df.astype(np.float32, errors='ignore')
+            except Exception:
+                pass
         else:
             dense_df = pd.DataFrame(index=df.index)
 
@@ -160,7 +171,6 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                         df_high[col] = df_high[col].where(df_high[col].isin(frequent), 'rare_category')
                     df_high_ohe = pd.get_dummies(df_high, columns=high, drop_first=True).reset_index(drop=True)
                     df_high_ohe.columns = _make_unique(list(df_high_ohe.columns))
-                    # append dense
                     if not dense_df.empty:
                         dense_df = pd.concat([dense_df.reset_index(drop=True), df_high_ohe.reset_index(drop=True)], axis=1)
                     else:
@@ -168,58 +178,77 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                     dense_df = dense_df.astype(np.float32, errors='ignore')
                     dense_feature_names = list(dense_df.columns)
                 elif self.high_cardinality_strategy == 'hashing':
-                    # HashingEncoder/FeatureHasher works on dict-of-records and can return sparse matrix
                     df_high = df[high].copy().fillna("").astype(str)
                     dict_rows = df_high.to_dict(orient='records')
                     if self.hasher_ is None:
                         self.hasher_ = FeatureHasher(n_features=self.n_hashing_features, input_type='dict')
                     hashed_sparse = self.hasher_.transform(dict_rows)  # scipy.sparse matrix
-                    # ensure csr
                     sparse_hashed = sp.csr_matrix(hashed_sparse, dtype=np.float32)
                     hashed_feature_names = [f"hash_{i}" for i in range(sparse_hashed.shape[1])]
 
-        # If output_sparse requested, convert dense to sparse and hstack
+        # If output_sparse requested, convert dense to sparse and hstack --- ensure final_features_ stability
         if self.output_sparse:
-            # Convert dense_df to sparse (CSR)
-            if not dense_df.empty:
-                dense_sparse = sp.csr_matrix(dense_df.fillna(0).values.astype(np.float32))
+            # Determine final feature ordering: use cached self.final_features_ if present; otherwise create and persist it
+            if not self.final_features_:
+                # finalize feature names: dense then hashed
+                self.final_features_ = list(dense_feature_names) + hashed_feature_names
+
+            final_dense_names = [n for n in self.final_features_ if not n.startswith("hash_")]
+            final_hashed_names = [n for n in self.final_features_ if n.startswith("hash_")]
+            # Build dense_sparse in the order of final_dense_names
+            if final_dense_names:
+                # ensure dense_df has these columns (fill missing with zeros)
+                dense_aligned = dense_df.reindex(columns=final_dense_names, fill_value=0)
+                dense_sparse = sp.csr_matrix(dense_aligned.fillna(0).values.astype(np.float32))
             else:
                 dense_sparse = None
 
-            if sparse_hashed is not None and dense_sparse is not None:
-                X_sparse = sp.hstack([dense_sparse, sparse_hashed], format='csr')
-                # feature names: dense_feature_names + hashed_feature_names
-                feature_names = dense_feature_names + hashed_feature_names
-            elif sparse_hashed is not None:
-                X_sparse = sparse_hashed
-                feature_names = hashed_feature_names
+            # Build hashed sparse aligned to final_hashed_names count
+            if final_hashed_names:
+                expected_hash_cols = len(final_hashed_names)
+                if sparse_hashed is None:
+                    # no hashed part present in this call but expected: create zero sparse
+                    sparse_hashed_aligned = sp.csr_matrix((len(df), expected_hash_cols), dtype=np.float32)
+                else:
+                    # if existing hashed matrix has different number of cols, pad or trim as needed
+                    if sparse_hashed.shape[1] == expected_hash_cols:
+                        sparse_hashed_aligned = sparse_hashed
+                    elif sparse_hashed.shape[1] < expected_hash_cols:
+                        # pad with zero columns
+                        pad = sp.csr_matrix((sparse_hashed.shape[0], expected_hash_cols - sparse_hashed.shape[1]), dtype=np.float32)
+                        sparse_hashed_aligned = sp.hstack([sparse_hashed, pad], format='csr')
+                    else:
+                        # trim extra columns
+                        sparse_hashed_aligned = sparse_hashed[:, :expected_hash_cols]
+            else:
+                sparse_hashed_aligned = None
+
+            # hstack dense + hashed
+            if dense_sparse is not None and sparse_hashed_aligned is not None:
+                X_sparse = sp.hstack([dense_sparse, sparse_hashed_aligned], format='csr')
+            elif sparse_hashed_aligned is not None:
+                X_sparse = sparse_hashed_aligned
             elif dense_sparse is not None:
                 X_sparse = dense_sparse
-                feature_names = dense_feature_names
             else:
-                # empty dataset
                 X_sparse = sp.csr_matrix((len(df), 0), dtype=np.float32)
-                feature_names = []
 
             if self.verbose:
-                print(f"--- Transform complete. Sparse shape: {X_sparse.shape} (dense_cols={len(dense_feature_names)}, hashed_cols={len(hashed_feature_names)}) ---")
-            return X_sparse, feature_names
+                print(f"--- Transform complete. Sparse shape: {X_sparse.shape} (features={len(self.final_features_)}) ---")
+            return X_sparse, self.final_features_
 
         # else return dense DataFrame (merge dense and hashed if grouping produced dense)
         if not dense_df.empty:
             X_out = dense_df.reset_index(drop=True)
         else:
             X_out = pd.DataFrame(index=df.index)
-        # if hashed part present as sparse but output_sparse False we convert hashed sparse to dense (may be big)
         if sparse_hashed is not None:
             hashed_dense = pd.DataFrame(sparse_hashed.toarray(), columns=hashed_feature_names).reset_index(drop=True)
             X_out = pd.concat([X_out.reset_index(drop=True), hashed_dense.reset_index(drop=True)], axis=1)
-        # ensure final features deterministic and store
         X_out.columns = _make_unique(list(X_out.columns))
         if not self.final_features_:
             self.final_features_ = X_out.columns.tolist()
         X_out = X_out.reindex(columns=self.final_features_, fill_value=0)
-        # downcast numeric to float32
         numeric_cols = X_out.select_dtypes(include=[np.number]).columns.tolist()
         if numeric_cols:
             X_out[numeric_cols] = X_out[numeric_cols].astype(np.float32)
@@ -258,6 +287,24 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
                     self.id_features_.append(col)
                     self.initial_numerical_features_.remove(col)
 
+
+def _make_unique(cols: List[str]) -> List[str]:
+    """Make list of column names unique by appending suffixes to duplicates (preserving order)."""
+    seen = {}
+    out = []
+    for c in cols:
+        if c not in seen:
+            seen[c] = 0
+            out.append(c)
+        else:
+            seen[c] += 1
+            new_name = f"{c}__dup{seen[c]}"
+            while new_name in seen:
+                seen[c] += 1
+                new_name = f"{c}__dup{seen[c]}"
+            seen[new_name] = 0
+            out.append(new_name)
+    return out
 
 def _make_unique(cols: List[str]) -> List[str]:
     """Make list of column names unique by appending suffixes to duplicates (preserving order)."""
