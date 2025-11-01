@@ -443,107 +443,148 @@ class ModelDataProfiler:
         """
         Return dict of suspicious features -> reasons/stats.
         Works for both raw categorical features and hashed numeric columns.
+
+        Improvements:
+        - Handles categorical targets by factorizing them into a temporary numeric column for computations.
+        - Safely handles categorical feature fillna for single-feature predictive tests using cat.add_categories
+        to avoid 'Cannot setitem on a Categorical with a new category' errors.
         """
         flags = defaultdict(list)
-        y = df[target].copy()
-        # Factorize / numericize target for use in numeric computations & classifier training
+
+        # Make a working copy to avoid side-effects
+        df_work = df.copy()
+
+        # If the target is non-numeric, factorize it and create a temporary numeric column
+        target_for_check = target
+        y = df_work[target]
         if y.dtype == 'O' or not pd.api.types.is_numeric_dtype(y):
-            y_num = pd.factorize(y)[0]
+            if verbose:
+                print("ℹ️ Target appears non-numeric; factorizing target for leakage checks.")
+            y_numeric, _ = pd.factorize(y)
+            df_work["_tmp_target_num_"] = y_numeric
+            target_for_check = "_tmp_target_num_"
+            y_num = y_numeric
         else:
-            y_num = y.values
+            y_num = df_work[target_for_check].values
 
         # Build feature lists if not provided
         if numerical_features is None:
-            numerical_features = df.select_dtypes(include=[np.number]).columns.tolist()
-            numerical_features = [c for c in numerical_features if c != target]
+            numerical_features = df_work.select_dtypes(include=[np.number]).columns.tolist()
+            numerical_features = [c for c in numerical_features if c != target_for_check and c != target]
         if categorical_features is None:
-            categorical_features = df.select_dtypes(exclude=[np.number]).columns.tolist()
+            categorical_features = df_work.select_dtypes(exclude=[np.number]).columns.tolist()
+            # remove target-like columns if present
+            categorical_features = [c for c in categorical_features if c != target and c != target_for_check]
 
         # ---- 1) Categorical: per-category purity check ----
         for col in categorical_features:
-            ser = df[col].astype("object")
-            nonnull = ser.dropna()
-            if len(nonnull) == 0:
-                continue
-            grp = df.groupby(col)[target].agg(['count','mean']).rename(columns={'count':'n','mean':'pos_rate'})
-            grp = grp[grp['n'] >= min_count]
-            if grp.empty:
-                continue
-            max_purity = grp['pos_rate'].max()
-            max_cat = grp['pos_rate'].idxmax()
-            max_n = grp.loc[max_cat, 'n']
-            if max_purity >= purity_threshold:
-                flags[col].append({
-                    'type':'category_purity',
-                    'max_purity': float(max_purity),
-                    'max_cat': max_cat,
-                    'count_in_cat': int(max_n),
-                    'message': f"Category '{col}=={max_cat}' has purity {max_purity:.3f} (n={max_n})"
-                })
-            # mutual information (categorical -> numeric target)
             try:
-                mi = mutual_info_classif(ser.fillna("##NA##").astype(str).values.reshape(-1,1), y_num, discrete_features=True)
-                if mi[0] > 0.1:
-                    flags[col].append({'type':'mutual_info','mi':float(mi[0])})
-            except Exception:
-                pass
+                ser = df_work[col].astype("object")
+                nonnull = ser.dropna()
+                if len(nonnull) == 0:
+                    continue
+                grp = df_work.groupby(col)[target_for_check].agg(['count', 'mean']).rename(columns={'count': 'n', 'mean': 'pos_rate'})
+                grp = grp[grp['n'] >= min_count]
+                if grp.empty:
+                    continue
+                max_purity = grp['pos_rate'].max()
+                max_cat = grp['pos_rate'].idxmax()
+                max_n = int(grp.loc[max_cat, 'n'])
+                if max_purity >= purity_threshold:
+                    flags[col].append({
+                        'type': 'category_purity',
+                        'max_purity': float(max_purity),
+                        'max_cat': max_cat,
+                        'count_in_cat': max_n,
+                        'message': f"Category '{col}=={max_cat}' has purity {max_purity:.3f} (n={max_n})"
+                    })
+                # mutual information (categorical -> numericized target)
+                try:
+                    mi = mutual_info_classif(ser.fillna("##NA##").astype(str).values.reshape(-1, 1), y_num, discrete_features=True)
+                    if mi[0] > 0.1:
+                        flags[col].append({'type': 'mutual_info', 'mi': float(mi[0])})
+                except Exception:
+                    # don't crash mutual info calculation
+                    if verbose:
+                        print(f"⚠️ mutual_info_classif failed for column {col}.")
+                    pass
+            except Exception as e:
+                if verbose:
+                    print(f"Skipping categorical column {col} in purity/MI checks due to: {e}")
+                continue
 
         # ---- 2) Numerical: check deterministic mapping / point-biserial correlation ----
         for col in numerical_features:
-            ser = df[col]
-            nonnull = ser.dropna()
-            if len(nonnull) == 0:
-                continue
-            value_counts = df.groupby(col)[target].agg(['count','mean']).rename(columns={'count':'n','mean':'pos_rate'})
-            special = value_counts[value_counts['n'] >= min_count]
-            if not special.empty:
-                mv = special['pos_rate'].max()
-                if mv >= purity_threshold:
-                    val = special['pos_rate'].idxmax()
-                    flags[col].append({
-                        'type':'value_purity',
-                        'value': float(val) if pd.api.types.is_numeric_dtype(val) else str(val),
-                        'purity': float(mv),
-                        'message': f"value {val} in {col} has purity {mv:.3f}"
-                    })
-            # skip point-biserial conversion if not binary target
             try:
-                unique_y = np.unique(y_num)
-                if len(unique_y) == 2:
-                    from scipy.stats import pointbiserialr
-                    r, p = pointbiserialr(ser.fillna(ser.mean()), y_num)
-                    if abs(r) > 0.9:
-                        flags[col].append({'type':'point_biserial','r':float(r),'p':float(p)})
-            except Exception:
-                pass
+                ser = df_work[col]
+                nonnull = ser.dropna()
+                if len(nonnull) == 0:
+                    continue
+                value_counts = df_work.groupby(col)[target_for_check].agg(['count', 'mean']).rename(columns={'count': 'n', 'mean': 'pos_rate'})
+                special = value_counts[value_counts['n'] >= min_count]
+                if not special.empty:
+                    mv = special['pos_rate'].max()
+                    if mv >= purity_threshold:
+                        val = special['pos_rate'].idxmax()
+                        flags[col].append({
+                            'type': 'value_purity',
+                            'value': float(val) if pd.api.types.is_numeric_dtype(val) else str(val),
+                            'purity': float(mv),
+                            'message': f"value {val} in {col} has purity {mv:.3f}"
+                        })
+                # point-biserial for binary targets only
+                try:
+                    unique_y = np.unique(y_num)
+                    if len(unique_y) == 2:
+                        from scipy.stats import pointbiserialr
+                        r, p = pointbiserialr(ser.fillna(ser.mean()), y_num)
+                        if abs(r) > 0.9:
+                            flags[col].append({'type': 'point_biserial', 'r': float(r), 'p': float(p)})
+                except Exception:
+                    pass
+            except Exception as e:
+                if verbose:
+                    print(f"Skipping numerical column {col} in purity/point-biserial checks due to: {e}")
+                continue
 
         # ---- 3) Single-feature predictive power (fast stumps/logistic) ----
-        # Use y_num (factorized) as the training label to avoid dtype conversion issues
+        # Use the numericized target (y_num) for fitting simple stumps/logistics
         for col in (categorical_features + numerical_features):
-            Xcol = df[[col]].copy()
-            if Xcol[col].dropna().empty:
-                continue
-            is_cat = col in categorical_features
-            if is_cat:
-                X_test = Xcol.copy()
-                if pd.api.types.is_categorical_dtype(X_test[col]):
-                    X_test[col] = X_test[col].cat.add_categories("##NA##").fillna("##NA##")
-                else:
-                    X_test[col] = X_test[col].astype(str).fillna("##NA##")
-                clf = DecisionTreeClassifier(max_depth=1)
-            else:
-                X_test = Xcol.fillna(Xcol.mean())
-                clf = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=200)
-
             try:
-                # fit against numericized target
+                Xcol = df_work[[col]].copy()
+                if Xcol[col].dropna().empty:
+                    continue
+                is_cat = col in categorical_features
+                if is_cat:
+                    X_test = Xcol.copy()
+                    # If categorical dtype, safely add the placeholder category then fillna
+                    if pd.api.types.is_categorical_dtype(X_test[col]):
+                        try:
+                            X_test[col] = X_test[col].cat.add_categories("##NA##").fillna("##NA##")
+                        except Exception:
+                            # fallback to converting to object
+                            X_test[col] = X_test[col].astype(object).fillna("##NA##")
+                    else:
+                        X_test[col] = X_test[col].astype(str).fillna("##NA##")
+                    clf = DecisionTreeClassifier(max_depth=1)
+                else:
+                    X_test = Xcol.fillna(Xcol.mean())
+                    clf = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=200)
+
+                # Fit using numericized target
                 clf.fit(X_test, y_num)
                 pred = clf.predict(X_test)
                 acc = accuracy_score(y_num, pred)
                 if acc >= accuracy_threshold:
-                    flags[col].append({'type':'single_feature_acc','acc':float(acc),
-                                    'message':f"Single-feature classifier on '{col}' has accuracy {acc:.4f}"})
-            except Exception:
+                    flags[col].append({
+                        'type': 'single_feature_acc',
+                        'acc': float(acc),
+                        'message': f"Single-feature classifier on '{col}' has accuracy {acc:.4f}"
+                    })
+            except Exception as e:
+                if verbose:
+                    # Be verbose for debugging but continue scanning other columns
+                    print(f"Skipping {col} in single-feature predictive check due to: {e}")
                 continue
 
         # ---- 4) Hash-bucket inspection (if user provides hashed matrix) ----
@@ -554,14 +595,19 @@ class ModelDataProfiler:
                         s['note'] = "hash_bucket"
 
         # ---- 5) Name-based heuristics ----
-        suspicious_tokens = ['status','outcome','label','final','result','loan_status','decision','paid','closed']
-        for col in df.columns:
+        suspicious_tokens = ['status', 'outcome', 'label', 'final', 'result', 'loan_status', 'decision', 'paid', 'closed']
+        for col in df_work.columns:
             low = col.lower()
             if any(tok in low for tok in suspicious_tokens):
-                flags[col].append({'type':'name_warning','message':f"Column name contains suspicious token: {col}"})
+                flags[col].append({'type': 'name_warning', 'message': f"Column name contains suspicious token: {col}"})
 
-        return {k:list(v) for k,v in flags.items()}
-        
+        # Clean up temporary target if we added it
+        if "_tmp_target_num_" in df_work.columns:
+            # nothing to do with original df; we operated on copy
+            pass
+
+        return {k: list(v) for k, v in flags.items()}
+            
     def _fit_baseline_model(self, X, y, verbose: bool = True):
         """Automatically select regression or classification baseline."""
         if verbose: print("Fitting baseline model...")
