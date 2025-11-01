@@ -525,7 +525,11 @@ class ModelDataProfiler:
                 continue
             is_cat = col in categorical_features
             if is_cat:
-                X_test = Xcol.fillna("##NA##").astype(str)
+                X_test = Xcol.copy()
+                if pd.api.types.is_categorical_dtype(X_test[col]):
+                    X_test[col] = X_test[col].cat.add_categories("##NA##").fillna("##NA##")
+                else:
+                    X_test[col] = X_test[col].astype(str).fillna("##NA##")
                 clf = DecisionTreeClassifier(max_depth=1)
             else:
                 X_test = Xcol.fillna(Xcol.mean())
