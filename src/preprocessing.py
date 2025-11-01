@@ -9,11 +9,6 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from scipy import sparse as sp
 
 class AutoPreprocessor(BaseEstimator, TransformerMixin):
-    """
-    A preprocessor that automates feature detection, cleaning, imputation,
-    and encoding. Supports returning a sparse transform (hashed part as sparse)
-    to save memory for very high-cardinality features.
-    """
     def __init__(self, id_threshold: float = 0.95,
                  cardinality_threshold: int = 50,
                  high_cardinality_strategy: str = 'grouping',
@@ -44,24 +39,27 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
     def fit(self, X: pd.DataFrame, y=None):
         if self.verbose: print("--- Starting AutoPreprocessor fit ---")
         df = X.copy()
-        # initial detection
-        self.initial_numerical_features_ = df.select_dtypes(include=np.number).columns.tolist()
-        self.initial_categorical_features_ = df.select_dtypes(exclude=np.number).columns.tolist()
+
+        # exclude internal pipeline columns from detection
+        internal_prefixes = ["_swindler"]
+        cols_to_consider = [c for c in df.columns if not any(c.startswith(p) for p in internal_prefixes)]
+        # initial detection limited to considered cols
+        self.initial_numerical_features_ = [c for c in df[cols_to_consider].select_dtypes(include=np.number).columns.tolist()]
+        self.initial_categorical_features_ = [c for c in df[cols_to_consider].select_dtypes(exclude=np.number).columns.tolist()]
 
         # detect numeric-like stored as strings, dates and ids
         self._detect_feature_types(df)
 
         # prepare imputation map
         numerical_to_impute = [col for col in self.initial_numerical_features_ if col not in self.id_features_]
-        categorical_to_impute = [col for col in self.initial_categorical_features_
-                                 if col not in self.id_features_ and col not in self.date_features_]
+        categorical_to_impute = [col for col in self.initial_categorical_features_ if col not in self.id_features_ and col not in self.date_features_]
 
         for col in numerical_to_impute:
-            if df[col].isnull().any():
+            if col in df.columns and df[col].isnull().any():
                 self.imputation_values_[col] = df[col].median()
 
         for col in categorical_to_impute:
-            if df[col].isnull().any():
+            if col in df.columns and df[col].isnull().any():
                 mode = df[col].mode(dropna=True)
                 self.imputation_values_[col] = mode.iloc[0] if not mode.empty else "missing_category"
 
@@ -69,21 +67,31 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
         self.low_cardinality_features_ = []
         self.high_cardinality_features_ = []
         for col in categorical_to_impute:
-            if df[col].nunique(dropna=False) > self.cardinality_threshold:
+            if col in df.columns and df[col].nunique(dropna=False) > self.cardinality_threshold:
                 self.high_cardinality_features_.append(col)
             else:
                 self.low_cardinality_features_.append(col)
 
-        # prepare hashing if requested
+        # Adaptive hashing size: don't always use full n_hashing_features if not needed
+        # Compute total unique values across high-card features
+        try:
+            total_unique = sum(df[col].nunique(dropna=False) for col in self.high_cardinality_features_ if col in df.columns)
+            if total_unique > 0:
+                adaptive = max(8, min(self.n_hashing_features, int(max(8, min(self.n_hashing_features, total_unique // 5)))))
+                # make sure we don't exceed user-provided n_hashing_features
+                self.n_hashing_features = min(self.n_hashing_features, adaptive)
+        except Exception:
+            pass
+
         if self.high_cardinality_strategy == 'grouping':
             for col in self.high_cardinality_features_:
-                counts = df[col].value_counts(normalize=True)
-                self.frequent_categories_[col] = counts[counts >= self.rare_category_threshold].index.tolist()
+                if col in df.columns:
+                    counts = df[col].value_counts(normalize=True)
+                    self.frequent_categories_[col] = counts[counts >= self.rare_category_threshold].index.tolist()
             self.categorical_to_encode_ = self.low_cardinality_features_ + self.high_cardinality_features_
         elif self.high_cardinality_strategy == 'hashing':
             if self.high_cardinality_features_:
                 self.hasher_ = FeatureHasher(n_features=self.n_hashing_features, input_type='dict')
-            # for hashing, we will encode low-cardinals separately
             self.categorical_to_encode_ = self.low_cardinality_features_
         else:
             raise ValueError(f"Unknown high_cardinality_strategy: {self.high_cardinality_strategy}")
@@ -92,6 +100,7 @@ class AutoPreprocessor(BaseEstimator, TransformerMixin):
             print(f"Detected numerics: {len(self.initial_numerical_features_)}; categoricals: {len(self.initial_categorical_features_)}")
             print(f"Low-cardinality => OHE/label: {self.low_cardinality_features_}")
             print(f"High-cardinality => strategy {self.high_cardinality_strategy}: {self.high_cardinality_features_}")
+            print(f"n_hashing_features set to: {self.n_hashing_features}")
             print("--- AutoPreprocessor fit complete ---")
         return self
 

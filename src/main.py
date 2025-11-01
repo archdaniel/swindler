@@ -13,7 +13,7 @@ import json
 import time
 import math
 from typing import Any, Dict, Optional, Tuple
-
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, r2_score, mean_squared_error
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -264,7 +264,7 @@ def run_pipeline(
         X_hold = transformed_holdout
 
     def _compute_holdout_metrics(task_type, model, X, y):
-        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, r2_score, mean_squared_error
+
         metrics = {}
         y_pred = model.predict(X)
         if task_type == "classification":

@@ -312,6 +312,7 @@ class ModelTrainer:
                     continue
 
             # evaluate on test set
+              # Evaluate on test set (multiclass-aware)
             try:
                 y_pred = best_estimator.predict(X_test)
             except Exception:
@@ -319,16 +320,34 @@ class ModelTrainer:
 
             model_results = {'model': name, 'best_params': best_params}
             metrics_to_log = {}
+            # Detect multiclass
+            unique_y_test = np.unique(y_test)
+            is_multiclass = len(unique_y_test) > 2
+
             if self.task_type == 'classification':
-                try:
-                    y_proba = best_estimator.predict_proba(X_test)[:, 1]
-                except Exception:
-                    y_proba = None
+                # accuracy always OK
                 metrics_to_log['accuracy'] = accuracy_score(y_test, y_pred)
-                metrics_to_log['f1'] = f1_score(y_test, y_pred, zero_division=0)
-                metrics_to_log['precision'] = precision_score(y_test, y_pred, zero_division=0)
-                metrics_to_log['recall'] = recall_score(y_test, y_pred, zero_division=0)
-                metrics_to_log['roc_auc'] = float(roc_auc_score(y_test, y_proba)) if y_proba is not None else None
+                # macro averages for multiclass
+                if is_multiclass:
+                    metrics_to_log['f1_macro'] = f1_score(y_test, y_pred, average='macro', zero_division=0)
+                    metrics_to_log['precision_macro'] = precision_score(y_test, y_pred, average='macro', zero_division=0)
+                    metrics_to_log['recall_macro'] = recall_score(y_test, y_pred, average='macro', zero_division=0)
+                    # roc_auc for multiclass (if predict_proba available)
+                    try:
+                        y_proba = best_estimator.predict_proba(X_test)
+                        metrics_to_log['roc_auc_ovr'] = float(roc_auc_score(y_test, y_proba, multi_class='ovr'))
+                    except Exception:
+                        metrics_to_log['roc_auc_ovr'] = None
+                else:
+                    # binary metrics
+                    try:
+                        y_proba = best_estimator.predict_proba(X_test)[:, 1]
+                    except Exception:
+                        y_proba = None
+                    metrics_to_log['f1'] = f1_score(y_test, y_pred, zero_division=0)
+                    metrics_to_log['precision'] = precision_score(y_test, y_pred, zero_division=0)
+                    metrics_to_log['recall'] = recall_score(y_test, y_pred, zero_division=0)
+                    metrics_to_log['roc_auc'] = float(roc_auc_score(y_test, y_proba)) if y_proba is not None else None
             else:
                 metrics_to_log['r2'] = r2_score(y_test, y_pred)
                 metrics_to_log['rmse'] = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -342,16 +361,26 @@ class ModelTrainer:
     def _evaluate_and_select_best(self):
         if self.results_summary_.empty:
             raise RuntimeError("Models have not been trained yet. Run _train_and_tune() first.")
+
+        # Select best overall as before (use roc_auc for classification if available)
         if self.task_type == 'classification':
-            if 'roc_auc' in self.results_summary_.columns and self.results_summary_['roc_auc'].notna().any():
-                self.best_model_name_ = self.results_summary_.loc[self.results_summary_['roc_auc'].idxmax()]['model']
+            # Prefer roc_auc_ovr/roc_auc if present
+            score_col = None
+            for col in ['roc_auc', 'roc_auc_ovr', 'f1', 'f1_macro', 'accuracy']:
+                if col in self.results_summary_.columns and self.results_summary_[col].notna().any():
+                    score_col = col
+                    break
+            if score_col:
+                self.best_model_name_ = self.results_summary_.loc[self.results_summary_[score_col].idxmax()]['model']
             else:
                 self.best_model_name_ = self.results_summary_.iloc[0]['model']
         else:
             self.best_model_name_ = self.results_summary_.loc[self.results_summary_['r2'].idxmax()]['model']
+
         self.best_model_, self.best_params_ = self.models_[self.best_model_name_]
 
-        if self.verbose: print(f"\n🏆 Best Model Selected: {self.best_model_name_}")
+        if self.verbose:
+            print(f"\n🏆 Best Model Selected: {self.best_model_name_}")
 
         # Build feature importances safely, guarding against length mismatches.
         try:
@@ -387,7 +416,28 @@ class ModelTrainer:
             if self.verbose:
                 print(f"⚠️ Could not compute feature importances: {e}")
             self.feature_importances_ = pd.DataFrame()
-
+            
+        # --- Also build top-per-family mapping (keep top model for each family) ---
+        self.best_per_family_ = {}
+        for _, row in self.results_summary_.iterrows():
+            model_name = row['model']
+            # family: take token before first underscore or whole name
+            family = model_name.split('_')[0]
+            # choose primary score for comparison
+            if self.task_type == 'classification':
+                # prefer roc_auc_ovr > roc_auc > f1_macro > f1 > accuracy
+                score = None
+                for sc in ['roc_auc_ovr', 'roc_auc', 'f1_macro', 'f1', 'accuracy']:
+                    if sc in row and row.get(sc, None) is not None:
+                        score = row.get(sc)
+                        break
+                score = -999 if score is None else score
+            else:
+                score = row.get('r2', -999)
+            # update if better or not present
+            existing = self.best_per_family_.get(family)
+            if existing is None or score > existing['score']:
+                self.best_per_family_[family] = {'model': model_name, 'score': score, 'metrics': row.to_dict()}
     def _plot_results(self):
         if self.results_summary_.empty:
             print("No results to plot.")
