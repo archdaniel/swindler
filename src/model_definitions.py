@@ -101,8 +101,10 @@ class ModelTrainer:
             if feature_names:
                 self.features_used_ = feature_names
             else:
-                # create generic names for sparse/array inputs
-                n_feat = X.shape[1] if hasattr(X, "shape") else X.shape[1]
+                # create generic names for sparse/array inputs (one per column)
+                n_feat = int(X.shape[1]) if hasattr(X, "shape") else None
+                if n_feat is None:
+                    raise ValueError("Cannot infer number of features from X; provide feature_names.")
                 self.features_used_ = [f"f{i}" for i in range(n_feat)]
         else:
             raise ValueError("Either `data` (DataFrame) or `X` and `y` must be provided to ModelTrainer.")
@@ -265,53 +267,55 @@ class ModelTrainer:
                 fit_params = {'eval_set': (X_val, y_val), 'early_stopping_rounds': 10, 'verbose': False}
 
             # If using hyperopt space, run hyperopt (slow) otherwise GridSearchCV
-            if params and hp is not None and any(hasattr(v, 'name') for v in getattr(params, 'values', lambda: {})()):
-                # hyperopt flow (keeps previous design)
-                def objective(hyperparams):
-                    if 'iterations' in hyperparams:
-                        hyperparams['iterations'] = int(hyperparams['iterations'])
-                    clf = model.set_params(**hyperparams)
-                    try:
-                        score = cross_val_score(clf, X_train, y_train, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1).mean()
-                    except Exception:
-                        score = 0.0
-                    return {'loss': -score, 'status': STATUS_OK}
-                trials = Trials()
-                best_h = fmin(fn=objective, space=params, algo=tpe.suggest, max_evals=10, trials=trials, rstate=np.random.default_rng(self.random_state))
-                best_params = space_eval(params, best_h)
-                if 'iterations' in best_params:
-                    best_params['iterations'] = int(best_params['iterations'])
-                best_estimator = model.set_params(**best_params).fit(X_train, y_train, **(fit_params if supports_early else {}))
-            elif params:
-                # fallback to GridSearchCV. If early stopping is available, pass fit_params with eval_set to GridSearchCV.fit
-                try:
+            try:
+                if params and hp is not None and any(getattr(v, 'name', None) is not None for v in (params.values() if isinstance(params, dict) else [])):
+                    # hyperopt flow
+                    def objective(hyperparams):
+                        if 'iterations' in hyperparams:
+                            hyperparams['iterations'] = int(hyperparams['iterations'])
+                        clf = model.set_params(**hyperparams)
+                        try:
+                            score = cross_val_score(clf, X_train, y_train, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1).mean()
+                        except Exception:
+                            score = 0.0
+                        return {'loss': -score, 'status': STATUS_OK}
+                    trials = Trials()
+                    best_h = fmin(fn=objective, space=params, algo=tpe.suggest, max_evals=10, trials=trials, rstate=np.random.default_rng(self.random_state))
+                    best_params = space_eval(params, best_h)
+                    if 'iterations' in best_params:
+                        best_params['iterations'] = int(best_params['iterations'])
+                    best_estimator = model.set_params(**best_params).fit(X_train, y_train, **(fit_params if supports_early else {}))
+                elif params:
+                    # fallback to GridSearchCV.
                     search_cv = GridSearchCV(model, params, cv=self.cv_folds, scoring=self.scoring, n_jobs=-1)
                     if supports_early and X_val is not None:
+                        # pass fit_params if estimator supports eval_set
                         search_cv.fit(X_train, y_train, **fit_params)
                     else:
                         search_cv.fit(X_train, y_train)
                     best_estimator = search_cv.best_estimator_
                     best_params = search_cv.best_params_
-                except Exception as e:
-                    # fallback: plain fit
-                    if self.verbose:
-                        print(f"GridSearchCV failed for {name} with {e}. Falling back to direct fit.")
-                    best_estimator = model.fit(X_train, y_train)
-            else:
-                # no hyperparams to tune
-                try:
+                else:
+                    # no hyperparams to tune
                     if supports_early and X_val is not None:
                         best_estimator = model.fit(X_train, y_train, **fit_params)
                     else:
                         best_estimator = model.fit(X_train, y_train)
-                except Exception:
+            except Exception as e:
+                if self.verbose:
+                    print(f"⚠️ Training/search failed for {name} with error: {e}. Falling back to direct fit.")
+                try:
                     best_estimator = model.fit(X_train, y_train)
+                except Exception as e2:
+                    if self.verbose:
+                        print(f"Direct fit also failed for {name}: {e2}")
+                    continue
 
             # evaluate on test set
             try:
                 y_pred = best_estimator.predict(X_test)
             except Exception:
-                y_pred = best_estimator.predict(X_test)  # let exception surface if it fails
+                y_pred = best_estimator.predict(X_test)
 
             model_results = {'model': name, 'best_params': best_params}
             metrics_to_log = {}
@@ -339,7 +343,7 @@ class ModelTrainer:
         if self.results_summary_.empty:
             raise RuntimeError("Models have not been trained yet. Run _train_and_tune() first.")
         if self.task_type == 'classification':
-            if 'roc_auc' in self.results_summary_.columns:
+            if 'roc_auc' in self.results_summary_.columns and self.results_summary_['roc_auc'].notna().any():
                 self.best_model_name_ = self.results_summary_.loc[self.results_summary_['roc_auc'].idxmax()]['model']
             else:
                 self.best_model_name_ = self.results_summary_.iloc[0]['model']
@@ -348,19 +352,41 @@ class ModelTrainer:
         self.best_model_, self.best_params_ = self.models_[self.best_model_name_]
 
         if self.verbose: print(f"\n🏆 Best Model Selected: {self.best_model_name_}")
-        # feature importances if available
-        if hasattr(self.best_model_, 'feature_importances_'):
-            importances = self.best_model_.feature_importances_
-            self.feature_importances_ = pd.DataFrame({
-                'feature': self.features_used_,
-                'importance': importances
-            }).sort_values('importance', ascending=False)
-        elif hasattr(self.best_model_, 'coef_'):
-            importances = np.abs(self.best_model_.coef_.ravel())
-            self.feature_importances_ = pd.DataFrame({
-                'feature': self.features_used_,
-                'importance': importances
-            }).sort_values('importance', ascending=False)
+
+        # Build feature importances safely, guarding against length mismatches.
+        try:
+            if hasattr(self.best_model_, 'feature_importances_'):
+                importances = np.array(self.best_model_.feature_importances_).ravel()
+                # align feature names length and importances length
+                if len(importances) == len(self.features_used_):
+                    features = self.features_used_
+                else:
+                    # fallback: synthesize feature names if sizes differ
+                    features = [f"f{i}" for i in range(len(importances))]
+                self.feature_importances_ = pd.DataFrame({
+                    'feature': features,
+                    'importance': importances
+                }).sort_values('importance', ascending=False)
+            elif hasattr(self.best_model_, 'coef_'):
+                coef = np.array(self.best_model_.coef_)
+                # flatten in a sensible way: if multi-class, sum absolute coefs across classes
+                if coef.ndim == 1:
+                    importances = np.abs(coef)
+                else:
+                    importances = np.abs(coef).sum(axis=0)
+                importances = importances.ravel()
+                if len(importances) == len(self.features_used_):
+                    features = self.features_used_
+                else:
+                    features = [f"f{i}" for i in range(len(importances))]
+                self.feature_importances_ = pd.DataFrame({
+                    'feature': features,
+                    'importance': importances
+                }).sort_values('importance', ascending=False)
+        except Exception as e:
+            if self.verbose:
+                print(f"⚠️ Could not compute feature importances: {e}")
+            self.feature_importances_ = pd.DataFrame()
 
     def _plot_results(self):
         if self.results_summary_.empty:
